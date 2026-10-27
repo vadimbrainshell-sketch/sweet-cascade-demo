@@ -24,7 +24,7 @@ function validSwap(board,a,b){if(!adjacent(a,b)||!board[a]||!board[b]||board[a].
 function moves(board){const out=[];for(let i=0;i<49;i++)for(const j of [i+1,i+7])if(j<49&&validSwap(board,i,j))out.push([i,j]);return out;}
 const payout=(bet,chains,mult)=>Math.max(0,Math.round(bet*5*Math.max(chains*(mult||1)-1,0))/100);
 class DemoRGS{
- constructor(saved){this.s=saved||{version:0,balance:10000,bet:1,mode:'base',meter:0,board:[],bonus:null,history:[],seed:192741,id:0};if(!this.s.board.length)this.s.board=this.fresh();for(const c of this.s.board)if(c.kind==='ice')c.maxHp??=c.hp;this.cache=new Map();}
+ constructor(saved){this.s=saved||{version:0,balance:10000,bet:1,mode:'base',meter:0,board:[],bonus:null,history:[],seed:192741,id:0};if(!this.s.board.length)this.s.board=this.fresh();for(const c of this.s.board)if(c.kind==='ice')c.maxHp??=c.hp;this.cache=new Map();if(!moves(this.s.board).length){this.s.board=this.reshuffle(this.s.board);this.s.version++;}}
  rng(){let x=this.s.seed|0;x^=x<<13;x^=x>>>17;x^=x<<5;this.s.seed=x>>>0;return this.s.seed/4294967296;}
  candy(special=true){const s=this.s;const c={id:++s.id,color:Math.floor(this.rng()*6),kind:'candy'};if(special){let r=this.rng(),rich=s.mode==='enhanced';if(r<(rich?.095:.035)){c.kind=this.rng()<.5?'bomb':'rocket';c.dir=Math.floor(this.rng()*4);}else if(r<(rich?.18:.07)){c.mult=[2,3,5,10][Math.floor(this.rng()*4)];}else if(r<(rich?.20:s.mode==='luck'?.105:.085))c.magic=true;if(s.mode==='mayhem')c.mult=[2,5,10,20][Math.floor(this.rng()*4)];}return c;}
  // Presentation-only refill bias. Only newly spawned candies change; survivors persist.
@@ -34,7 +34,7 @@ class DemoRGS{
  reshuffle(board){const slots=board.map((c,i)=>c.kind==='ice'?-1:i).filter(i=>i>=0),pieces=slots.map(i=>board[i]);for(let attempt=0;attempt<256;attempt++){const shuffled=[...pieces];for(let i=shuffled.length-1;i>0;i--){const j=Math.floor(this.rng()*(i+1));[shuffled[i],shuffled[j]]=[shuffled[j],shuffled[i]];}const next=[...board];slots.forEach((i,k)=>next[i]=shuffled[k]);if(!matches(next).length&&moves(next).length)return next;}throw Error('Could not find a playable shuffle. Please try again.');}
  cost(){return this.s.bet*({base:1,luck:2,enhanced:50,mayhem:1000}[this.s.mode]);}
  mode(mode){if(this.s.bonus)throw Error('A bonus is already active.');this.s.mode=mode;this.s.board.forEach(c=>{delete c.mult;});if(mode==='mayhem')this.s.board.forEach(c=>{if(c.kind==='candy')c.mult=[2,5,10][Math.floor(this.rng()*3)];});if(mode==='enhanced')for(let i=0;i<3;i++){let j=Math.floor(this.rng()*49);this.s.board[j].kind=i%2?'rocket':'bomb';this.s.board[j].dir=0;}this.s.version++;return this.snapshot();}
- bonusStart(){const s=this.s;s.bonus={moves:5,chains:0,mult:0,win:0,bet:s.bet,base:clone(s.board),meter:s.meter};s.board=this.fresh();for(let i=35;i<49;i++)s.board[i]={id:++s.id,kind:'ice',hp:2+Math.floor(this.rng()*2),mult:[2,3,5,10][Math.floor(this.rng()*4)],color:-1};for(const c of s.board)if(c.kind==='ice')c.maxHp=c.hp;s.mode='base';}
+ bonusStart(){const s=this.s;s.bonus={moves:5,chains:0,mult:0,win:0,bet:s.bet,base:clone(s.board),meter:s.meter};s.board=this.fresh();for(let i=35;i<49;i++)s.board[i]={id:++s.id,kind:'ice',hp:2+Math.floor(this.rng()*2),mult:[2,3,5,10][Math.floor(this.rng()*4)],color:-1};for(const c of s.board)if(c.kind==='ice')c.maxHp=c.hp;if(!moves(s.board).length)s.board=this.reshuffle(s.board);s.mode='base';}
  buy(){if(this.s.bonus)throw Error('A bonus is already active.');if(this.s.balance<this.s.bet*100)throw Error('Not enough demo credits.');this.s.balance-=this.s.bet*100;this.bonusStart();this.s.version++;return this.snapshot();}
  play(a,b,requestId=crypto.randomUUID(),version=this.s.version){
   if(this.cache.has(requestId))return clone(this.cache.get(requestId));
@@ -112,7 +112,124 @@ function specialTexture(kind,dir=0){const c=document.createElement('canvas');c.w
  else{let g=x.createLinearGradient(-50,-50,50,50);g.addColorStop(0,'#e5ffff');g.addColorStop(.35,'#79ddff');g.addColorStop(1,'#3173cc');x.fillStyle=g;x.beginPath();x.roundRect(-48,-48,96,96,15);x.fill();x.strokeStyle='#eaffff';x.lineWidth=4;x.stroke();x.strokeStyle='#ffffff66';x.lineWidth=8;x.beginPath();x.moveTo(-35,23);x.lineTo(18,-35);x.stroke();}
  return PIXI.Texture.from(c);}
 
+// All coordinates use the background artwork's 1672 x 941 design space.
+// A single cover transform keeps the separate artwork attached on every viewport.
+async function mountKingdom(element) {
+  const urls=['public/kingdom/castle-layer.png','public/kingdom/skyline.png'];
+  const images=await Promise.all(urls.map(url=>new Promise((resolve,reject)=>{
+    const image=new Image();image.onload=()=>resolve(image);image.onerror=()=>reject(new Error(`Background asset: ${url}`));image.src=url;
+  })));
+  const [background,skyline]=images;
+  const canvas=document.createElement('canvas');canvas.className='kingdom-scene';canvas.setAttribute('aria-hidden','true');
+  const ctx=canvas.getContext('2d');element.appendChild(canvas);
+  const clouds=document.createElement('canvas');clouds.width=1672;clouds.height=941;
+  const cloudCtx=clouds.getContext('2d');
+  const pennants=document.createElement('canvas');pennants.width=3344;pennants.height=1882;
+  const flagCtx=pennants.getContext('2d');
+  flagCtx.scale(2,2);flagCtx.imageSmoothingQuality='high';
+  // Flat rectangular cloth and printed logo are deformed together at render time.
+  const cloth=document.createElement('canvas');cloth.width=320;cloth.height=136;
+  const clothCtx=cloth.getContext('2d');
+  const cloud=document.createElement('canvas');cloud.width=360;cloud.height=150;
+  const brush=cloud.getContext('2d');brush.filter='blur(4px)';
+  const tint=brush.createLinearGradient(0,20,0,135);tint.addColorStop(0,'#fffefa');tint.addColorStop(1,'#d9e8fa');brush.fillStyle=tint;
+  brush.beginPath();brush.ellipse(174,100,143,27,0,0,Math.PI*2);brush.ellipse(95,85,49,34,0,0,Math.PI*2);brush.ellipse(151,61,54,43,0,0,Math.PI*2);brush.ellipse(209,80,55,39,0,0,Math.PI*2);brush.ellipse(264,98,48,23,0,0,Math.PI*2);brush.fill();
+  let width=1,height=1,ratio=1,time=0,last=0,frame=0,previousPaint=0;
+  const reduced=matchMedia('(prefers-reduced-motion: reduce)');
+  function resize(){width=element.clientWidth;height=element.clientHeight;ratio=Math.min(devicePixelRatio||1,1.5);canvas.width=Math.round(width*ratio);canvas.height=Math.round(height*ratio);draw();}
+  function drawFlag(x,y,w,h,phase){
+    // Start with a straight, full cloth surface; no pre-bent silhouette mask.
+    const steps=80,phaseAt=time*1.35+phase;
+    clothCtx.globalCompositeOperation='source-over';clothCtx.clearRect(0,0,320,136);
+
+    const lighting=clothCtx.createLinearGradient(0,0,320,0);
+    for(let i=0;i<=80;i++){
+      const u=i/80,envelope=1-Math.exp(-u*7),angle=phaseAt-u*7.4;
+      // The bright ridge and shaded trough travel with the SAME deformation phase.
+      const light=21-Math.sin(angle)*7*envelope-Math.sin(angle*1.65+.6)*2*envelope;
+      lighting.addColorStop(u,`hsl(283 61% ${light}%)`);
+    }
+    clothCtx.fillStyle=lighting;clothCtx.fillRect(0,0,320,136);
+    clothCtx.globalCompositeOperation='source-atop';
+    // Print onto the cloth BEFORE slicing: logo and fabric share the same wave.
+    clothCtx.drawImage(skyline,16,43,145,54);
+    const inkLight=clothCtx.createLinearGradient(0,0,320,0);
+    for(let i=0;i<=40;i++){
+      const u=i/40,shade=-Math.sin(phaseAt-u*7.4)*(1-Math.exp(-u*7));
+      inkLight.addColorStop(u,shade>0?`rgba(255,235,245,${shade*.12})`:`rgba(65,0,28,${-shade*.16})`);
+    }
+    clothCtx.fillStyle=inkLight;clothCtx.fillRect(0,0,320,136);
+    const vertical=clothCtx.createLinearGradient(0,0,0,136);
+    vertical.addColorStop(0,'rgba(255,220,235,.12)');vertical.addColorStop(.4,'rgba(255,220,235,0)');vertical.addColorStop(1,'rgba(85,5,42,.12)');
+    clothCtx.fillStyle=vertical;clothCtx.fillRect(0,0,320,136);
+    // One smooth deformed triangular silhouette trims slice overdraw at the rim.
+    const edge=(u,bottom)=>{
+      const envelope=1-Math.exp(-u*7),angle=phaseAt-u*7.4;
+      const wave=(Math.sin(angle)*.15+Math.sin(angle*1.65+.6)*.025)*h*envelope;
+      const stretch=1+Math.cos(angle+.6)*.10*envelope;
+      return [x+w*u,y+wave+h*(bottom?1-u*.5:u*.5)*stretch];
+    };
+    flagCtx.save();flagCtx.beginPath();flagCtx.moveTo(...edge(0,false));
+    for(let i=1;i<=steps;i++)flagCtx.lineTo(...edge(i/steps,false));
+    for(let i=steps-1;i>=0;i--)flagCtx.lineTo(...edge(i/steps,true));
+    flagCtx.closePath();flagCtx.clip();
+    for(let i=0;i<steps;i++){
+      const u=i/steps,v=(i+1)/steps;
+      // The wave builds quickly beyond the fixed hoist, crossing the whole cloth.
+      const envelope=1-Math.exp(-u*7);
+      const angle=phaseAt-u*7.4;
+      const wave=(Math.sin(angle)*.15+Math.sin(angle*1.65+.6)*.025)*h*envelope;
+      const stretch=1+Math.cos(angle+.6)*.10*envelope;
+      flagCtx.drawImage(cloth,320*u,0,320/steps+1,136,x+w*u,y+wave,w/steps+.55,h*stretch);
+    }
+    flagCtx.restore();
+  }
+  function drawClouds(){
+    cloudCtx.clearRect(0,0,1672,941);cloudCtx.globalCompositeOperation='source-over';
+    const layers=[{x:340,y:40,s:.70,v:15,a:.55},{x:830,y:90,s:.85,v:13,a:.53},{x:1320,y:45,s:.65,v:15,a:.5},{x:540,y:205,s:.58,v:17,a:.48},{x:1070,y:170,s:.95,v:12,a:.54},{x:1510,y:270,s:.63,v:16,a:.48},{x:150,y:310,s:.55,v:18,a:.44}];
+    for(const c of layers){const x=((c.x+time*c.v+400)%2472)-400;cloudCtx.globalAlpha=c.a;cloudCtx.drawImage(cloud,x,c.y,360*c.s,150*c.s);}
+    cloudCtx.globalAlpha=1;
+    ctx.drawImage(clouds,0,0);
+  }
+  function draw(){
+    const scale=Math.max(width/1672,height/941),ox=(width-1672*scale)/2,oy=(height-941*scale)/2;
+    ctx.setTransform(ratio,0,0,ratio,0,0);ctx.clearRect(0,0,width,height);
+    ctx.translate(ox,oy);ctx.scale(scale,scale);
+    const skyTint=ctx.createLinearGradient(0,0,0,700);skyTint.addColorStop(0,'#24aafa');skyTint.addColorStop(1,'#86dcf5');
+    ctx.fillStyle=skyTint;ctx.fillRect(0,0,1672,941);
+    drawClouds();
+    flagCtx.clearRect(0,0,1672,941);flagCtx.globalCompositeOperation='source-over';
+    // Attachment edges sit on the RIGHT side of each pole, below its finial.
+    drawFlag(576,38,100,41,0);drawFlag(1190,253,76,32,2.1);drawFlag(1065,402,44,18,4.3);
+
+    ctx.drawImage(pennants,0,0,1672,941);
+    // Small stationary fabric sleeves bridge the protected pole edge and cloth.
+    // They sit below finials and never move across the gold pole or roof.
+    ctx.fillStyle='#451553';
+    for(const [x,y,w,h] of [[578,41,6,27],[1192,256,6,20],[1067,404,4,11]]){
+      ctx.beginPath();ctx.roundRect(x,y,w,h,1);ctx.fill();
+    }
+    // Architecture, including the poles, occludes the cloth attachments naturally.
+    ctx.drawImage(background,0,0,1672,941);
+  }
+  function tick(now){frame=0;if(document.hidden)return;
+    if(last)time+=Math.min((now-last)/1000,.05);last=now;
+    if(now-previousPaint>=32){draw();previousPaint=now;}
+    if(!reduced.matches)frame=requestAnimationFrame(tick);
+  }
+  function resume(){cancelAnimationFrame(frame);last=0;if(!document.hidden){draw();if(!reduced.matches)frame=requestAnimationFrame(tick);}}
+  const observer=new ResizeObserver(resize);observer.observe(element);
+  document.addEventListener('visibilitychange',resume);reduced.addEventListener('change',resume);
+  resize();resume();element.dataset.kingdomReady='true';
+  if(new URLSearchParams(location.search).has('qa'))window.kingdomQA={
+    renderAt(seconds){cancelAnimationFrame(frame);time=seconds;draw();},
+    background,canvas
+  };
+  return ()=>{cancelAnimationFrame(frame);observer.disconnect();document.removeEventListener('visibilitychange',resume);reduced.removeEventListener('change',resume);canvas.remove();};
+}
+
 const $=s=>document.querySelector(s), money=n=>n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+await mountKingdom($('#game')).catch(error=>console.warn('Kingdom background fallback',error));
 const KEY='sweet-cascade-v1';let saved;try{saved=JSON.parse(localStorage.getItem(KEY));}catch{}
 const rgs=new DemoRGS(saved),sound=new Sound();let state=rgs.snapshot(),busy=false,held=false,auto=0,speed=1,selected=null,displayWin=state.bonus?.win||0,displayMult=state.bonus?.mult||1,lastInput=Date.now();
 await Promise.all([document.fonts.load('700 28px Alexandria'),sound.loadSamples()]);
@@ -190,5 +307,4 @@ app.ticker.add(t=>{let dt=Math.min(t.deltaMS,50);const hoverActive=hoveredCell!=
 draw(state.board);hud();persist();window.sweetCascade={rgs,play,get state(){return clone(state);},get busy(){return busy;},app};
 // Reproducible visual QA is opt-in and never changes the normal game session.
 if(new URLSearchParams(location.search).has('qa')){const qa=document.createElement('button');qa.textContent='VFX TEST';qa.style.cssText='position:fixed;bottom:50px;left:10px;z-index:5;background:#172944;padding:10px;border-radius:8px';document.body.append(qa);qa.onclick=async()=>{if(busy)return;busy=true;try{await effect({kind:'bomb',i:24});burst(24,0xffd65a,40);await pause(500);await effect({kind:'rocket',i:38,dir:0});await pause(500);await shuffleBoard(state.board);}finally{busy=false;}};}
-
 

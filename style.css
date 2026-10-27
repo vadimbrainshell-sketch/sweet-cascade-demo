@@ -4,7 +4,7 @@
 /* V2: independent layers; the host never inherits background cover scaling. */
 .backdrop{background-image:url('public/factory-clean.png');background-position:center;background-size:cover}
 .frost{background-image:url('public/frost-clean.png');background-position:center;background-size:cover}
-.host{position:absolute;left:0;bottom:4%;width:27%;height:64%;z-index:0;pointer-events:none;transform-origin:50% 100%}
+.host{position:absolute;left:0;bottom:4%;width:27%;height:64%;z-index:3;pointer-events:none;transform-origin:50% 100%}
 .host img{width:100%;height:100%;object-fit:contain;object-position:center bottom;filter:drop-shadow(0 5px 3px #34264b40)}
 .brand{top:12%;left:1%;width:25%;height:24%;transform:none;filter:none;z-index:2}
 .brand img{width:100%;height:100%;object-fit:contain;filter:drop-shadow(0 5px 3px #87356f44)}
@@ -37,5 +37,10 @@ button{font-weight:700}.score strong,.balance strong,.betbox strong{font-family:
 .score>b{position:absolute;right:0;top:0;width:22%;min-width:0;height:100%;transform:scale(.7);transform-origin:right center}
 
 /* Soft contact shadow on the floor, separate from the character artwork. */
-.host::before{content:"";position:absolute;left:17%;bottom:3%;width:66%;height:4%;border-radius:50%;background:rgba(55,35,66,.28);filter:blur(9px);pointer-events:none;z-index:0}
-.host img{position:relative;z-index:1}
+.host::before{content:"";position:absolute;left:17%;bottom:7%;width:73%;height:4.5%;border-radius:50%;background:rgba(55,35,66,.48);filter:blur(8px);pointer-events:none;z-index:0}
+.host img{position:relative;z-index:1;transform:scale(1.1);transform-origin:left bottom}
+
+/* One candy kingdom in base and bonus. Animated layers share its cover transform. */
+.backdrop{background-image:url('public/kingdom/candy-court.png');background-position:center;background-size:cover}
+.frost,.bonus-active .frost{display:none}
+.kingdom-scene{position:absolute;inset:0;width:100%;height:100%;z-index:-1;pointer-events:none}
