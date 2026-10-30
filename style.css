@@ -44,3 +44,5 @@ button{font-weight:700}.score strong,.balance strong,.betbox strong{font-family:
 .backdrop{background-image:url('public/kingdom/candy-court.png');background-position:center;background-size:cover}
 .frost,.bonus-active .frost{display:none}
 .kingdom-scene{position:absolute;inset:0;width:100%;height:100%;z-index:-1;pointer-events:none}
+
+#rgs-status{position:fixed;inset:0;z-index:100;background:rgba(13,20,43,.82);display:grid;place-items:center;text-align:center;padding:24px}#rgs-status[hidden]{display:none}#rgs-status>div{max-width:500px;background:#1d2949;border:2px solid #8e9fe6;border-radius:24px;padding:28px}#rgs-status p{line-height:1.6}#rgs-reload{padding:14px 28px;background:#6641d9;border-radius:14px;color:white;font:inherit}

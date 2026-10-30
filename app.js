@@ -228,10 +228,255 @@ async function mountKingdom(element) {
   return ()=>{cancelAnimationFrame(frame);observer.disconnect();document.removeEventListener('visibilitychange',resume);reduced.removeEventListener('change',resume);canvas.remove();};
 }
 
+// One outstanding request. Never reconnect or replay a mutation automatically.
+class RgsTransport {
+ constructor({url,WebSocketImpl=globalThis.WebSocket,document:doc=globalThis.document,window:win=globalThis.window,timeout=15000,onFault=()=>{}}){
+  Object.assign(this,{url,WebSocketImpl,doc,win,timeout,onFault});this.pending=null;this.fault=null;this.unknownOutcome=false;
+  this.visibility=()=>{this.arm();};this.offline=()=>this.fail('Connection lost.');
+  doc?.addEventListener('visibilitychange',this.visibility);win?.addEventListener('pageshow',this.visibility);win?.addEventListener('offline',this.offline);
+ }
+ get healthy(){return !this.fault&&this.ws?.readyState===1;}
+ async connect(){
+  if(this.ws)throw Error('Session already started');
+  const ws=this.ws=new this.WebSocketImpl(this.url);
+  await new Promise((resolve,reject)=>{
+   this.opening={resolve,reject};this.openTimer=setTimeout(()=>this.fail('Connection timed out.'),this.timeout);
+   ws.onopen=()=>{clearTimeout(this.openTimer);this.opening=null;resolve();};
+   ws.onerror=()=>this.fail('Connection lost.');ws.onclose=()=>this.fail('Connection closed.');
+   ws.onmessage=e=>this.receive(e.data);
+  });
+ }
+ request(payload){
+  if(!this.healthy)return Promise.reject(Error(this.fault||'Not connected'));
+  if(this.pending)return Promise.reject(Error('A request is already pending'));
+  return new Promise((resolve,reject)=>{
+   const p=this.pending={payload,resolve,reject,mutation:payload.set==='bet'&&payload.action!=='reset'};
+   this.arm();try{this.ws.send(JSON.stringify(payload));}catch{this.fail('Could not send request.');}
+  });
+ }
+ arm(){
+  const p=this.pending;if(!p)return;clearTimeout(p.timer);
+  if(!this.doc?.hidden)p.timer=setTimeout(()=>{if(this.pending===p&&!this.doc?.hidden)this.fail('Server response timed out.');},this.timeout);
+ }
+ receive(data){
+  if(this.fault)return;
+  const p=this.pending;if(!p)return; // A duplicate cannot resolve another request without its echoed fields.
+  let reply;try{reply=JSON.parse(data);}catch{this.fail('Invalid server response.');return;}
+  const equal=(a,b)=>a===b||(a&&b&&typeof a==='object'&&typeof b==='object'&&Object.keys(a).length===Object.keys(b).length&&Object.keys(a).every(k=>equal(a[k],b[k])));
+  if(!equal(reply.on,p.payload)){this.fail('Server response does not match the pending request.');return;}
+  clearTimeout(p.timer);this.pending=null;
+  if(reply.error!==undefined&&reply.error!==false&&reply.error!==0){p.reject(Error('RGS rejected the request ('+String(reply.error)+').'));this.fail('RGS rejected the request.');return;}
+  p.resolve(reply);
+ }
+ fail(message){
+  if(this.fault)return;this.fault=message;
+  clearTimeout(this.openTimer);this.opening?.reject(Error(message));this.opening=null;
+  if(this.pending){const p=this.pending;this.unknownOutcome||=p.mutation;clearTimeout(p.timer);this.pending=null;p.reject(Error(message));}
+  if(this.ws&&this.ws.readyState<2)this.ws.close();this.onFault(message,this.unknownOutcome);
+ }
+ dispose(){this.doc?.removeEventListener('visibilitychange',this.visibility);this.win?.removeEventListener('pageshow',this.visibility);this.win?.removeEventListener('offline',this.offline);this.fail('Session closed.');}
+}
+
+// Server matrices are column-major; presentation arrays are row-major.
+function rgsMatrix(reels){
+ if(!Array.isArray(reels)||reels.length!==7||reels.some(c=>!Array.isArray(c)||c.length!==7))throw Error('Expected a 7 × 7 server board.');
+ return Array.from({length:49},(_,i)=>{const c=reels[i%7][Math.floor(i/7)];if(c===0)return null;const v=typeof c==='number'?{id:c}:c;if(!v||!Number.isInteger(v.id)||v.id<1||v.id>19)throw Error('Unknown server symbol.');return {...v};});
+}
+function rgsMove(a,b){
+ if(!Number.isInteger(a)||!Number.isInteger(b)||a<0||b<0||a>=49||b>=49||Math.abs(a%7-b%7)+Math.abs(Math.floor(a/7)-Math.floor(b/7))!==1)throw Error('Choose two adjacent symbols.');
+ const i=Math.min(a,b);return {column:i%7,row:Math.floor(i/7),direction:Math.abs(a-b)===1?'right':'down'};
+}
+function rgsHelpers(events,board){
+ const h=events.findLast(e=>e.type==='helper');if(!h)throw Error('Server did not return available moves.');
+ const cells=rgsMatrix(h.reels),pairs=[];
+ cells.forEach((c,i)=>{if(!c)return;if(board[i]?.serverId!==c.id)throw Error('Helper does not match the final board.');for(const [key,j] of [['right',i+1],['down',i+7]])if(c[key]){rgsMove(i,j);pairs.push([i,j]);}});
+ return pairs;
+}
+class RgsBoardAdapter {
+ constructor(){this.nextId=0;}
+ piece(raw,old){
+  if(!raw)return null;const type=raw.id;
+  // Ice/reset mechanics have not been implemented by csw1 yet. Never invent their outcome.
+  if(type>17)throw Error('This server mechanic is not supported by the test client yet (symbol '+type+').');
+  const c={id:old?.id??++this.nextId,serverId:type,activated:raw.activated??0};
+  if(type<=12)Object.assign(c,{kind:'candy',color:(type-1)%6,magic:type>6});
+  else if(type<=16)Object.assign(c,{kind:'rocket',dir:type-13,color:0});else Object.assign(c,{kind:'bomb',color:1});
+  return c;
+ }
+ initial(reels){const board=rgsMatrix(reels).map(c=>this.piece(c));if(board.some(c=>!c))throw Error('Incomplete initial board.');return board;}
+ replay(previous,bet,requested){
+  if(!bet||!Array.isArray(bet.events))throw Error('Missing server result.');
+  const start=rgsMatrix(bet.reels);if(start.some((c,i)=>c?.id!==previous[i]?.serverId))throw Error('Server board differs from the displayed board.');
+  let board=structuredClone(previous),events=[],step=0,win=0,accepted=false,phase='ready',fired=new Map();
+  for(const e of bet.events){
+   if(e.type==='helper')continue;
+   if(e.type==='bet'){
+    if(accepted||phase!=='ready')throw Error('Unexpected swap sequence.');
+    const mask=rgsMatrix(e.reels),pair=mask.flatMap((c,i)=>c?[i]:[]);
+    if(pair.length!==2)throw Error('Invalid server swap.');const [a,b]=pair;rgsMove(a,b);
+    const expected=rgsMove(...requested);if(JSON.stringify(rgsMove(a,b))!==JSON.stringify(expected))throw Error('Server swapped a different pair.');
+    if(pair.some(i=>mask[i].id!==board[i]?.serverId))throw Error('Swap mask differs from board.');
+    [board[a],board[b]]=[board[b],board[a]];accepted=true;events.push({type:'swap',a,b,board:structuredClone(board)});continue;
+   }
+   if(['regular','arrow','bomb'].includes(e.type)){
+    if(!accepted||phase!=='ready')throw Error('Unexpected match sequence.');
+    const mask=rgsMatrix(e.reels);
+    if(e.type==='arrow'||e.type==='bomb')mask.forEach((c,i)=>{
+     if(c?.activated===1&&((e.type==='arrow'&&c.id>=13&&c.id<=16)||(e.type==='bomb'&&c.id===17)))fired.set(i,{kind:e.type==='arrow'?'rocket':'bomb',i,dir:c.id-13});
+    });
+    if(e.win!==undefined){if(!Number.isFinite(e.win)||e.win<0)throw Error('Invalid event win.');win+=e.win;}continue;
+   }
+   if(e.type==='tumble'&&e.action==='clean'){
+    if(!accepted||phase!=='ready')throw Error('Unexpected clean sequence.');
+    const clean=rgsMatrix(e.reels),cells=[],effects=[...fired.values()];fired.clear();
+    clean.forEach((c,i)=>{if(!c&&board[i]){cells.push(i);}else if(c&&!board[i])throw Error('Clean created a new symbol.');});
+    board=clean.map((c,i)=>this.piece(c,board[i]));
+    events.push({type:'destroy',cells,ice:[],damage:[],armed:[],effects,step:step++,win:Math.round(win*100)/100,mult:1,board:structuredClone(board)});phase='clean';continue;
+   }
+   if(e.type==='tumble'&&e.action==='fall'){
+    if(phase!=='clean')throw Error('Unexpected fall sequence.');
+    const raw=rgsMatrix(e.reels),next=Array(49).fill(null);
+    for(let x=0;x<7;x++){
+     const survivors=board.filter((c,i)=>i%7===x&&c);let k=0;
+     for(let y=0;y<7;y++){const i=y*7+x;if(raw[i]){const old=survivors[k++];if(!old||old.serverId!==raw[i].id)throw Error('Gravity differs from server board.');next[i]=this.piece(raw[i],old);}}
+     if(k!==survivors.length)throw Error('Gravity lost a symbol.');
+    }
+    board=next;phase='fall';continue;
+   }
+   if(e.type==='tumble'&&e.action==='new'){
+    if(phase!=='fall')throw Error('Unexpected refill sequence.');
+    rgsMatrix(e.reels).forEach((c,i)=>{if(c){if(board[i])throw Error('Refill overwrote a survivor.');board[i]=this.piece(c);}});
+    if(board.some(c=>!c))throw Error('Incomplete refill.');events.push({type:'fall',board:structuredClone(board)});phase='ready';continue;
+   }
+   throw Error('Unsupported RGS event: '+String(e.type)+(e.action?' / '+e.action:''));
+  }
+  if(phase!=='ready')throw Error('Incomplete cascade sequence.');
+  const helpers=rgsHelpers(bet.events,board);
+  if(!accepted&&bet.events.some(e=>e.type!=='helper'))throw Error('Invalid rejected move.');
+  return {accepted,board,events,helpers};
+ }
+}
+
+
+const RGS_TEST_CONFIG=Object.freeze({url:'wss://dev.skyline-api.net/wss',game:'csw1'});
+class ServerRGS {
+ constructor({transport,location=globalThis.location,onFault=()=>{}}={}){
+  this.remote=true;this.ready=false;this.ctx=null;this.adapter=new RgsBoardAdapter();this.location=location;this.onFault=onFault;
+  this.transport=transport||new RgsTransport({...RGS_TEST_CONFIG,onFault:(...args)=>{this.ready=false;onFault(...args);}});
+  this.s={board:[],balance:0,bet:0,mode:'base',bonus:null,meter:0,history:[],version:0};this.helpers=[];this.bets=[];
+ }
+ get playable(){return this.ready&&this.transport.healthy&&!this.transport.pending;}
+ snapshot(){return structuredClone(this.s);}
+ cost(){return this.s.bet;}
+ moves(){return this.helpers.map(p=>[...p]);}
+ fail(message,unknown=false){this.ready=false;this.transport.unknownOutcome||=unknown;this.transport.fail(message);}
+ wallet(reply){const wallet=reply.wallet;if(!wallet||!Number.isFinite(wallet.balance)||wallet.balance<0)throw Error('Invalid server wallet.');return wallet;}
+ async initialize(){
+  try{
+   await this.transport.connect();
+   const location={};for(const key of ['href','protocol','host','hostname','pathname','search','hash'])location[key]=this.location?.[key]||'';
+   const auth=await this.transport.request({set:'authentication',location});
+   if(auth.authentication!==true||auth.is?.test!==true)throw Error('This client requires a confirmed RGS test session.');
+   const game=await this.transport.request({set:'game',game:RGS_TEST_CONFIG.game});
+   if(game.game?.tag!==RGS_TEST_CONFIG.game||game.game.layout?.width!==7||game.game.layout?.height!==7||!game.game.paytable)throw Error('Unexpected game configuration.');
+   if(!Array.isArray(game.bets)||!game.bets.length||game.bets.some(b=>!Number.isFinite(b)||b<=0))throw Error('Invalid server bets.');
+   this.bets=[...new Set(game.bets)].sort((a,b)=>a-b);this.config=game.game;
+   const initialWallet=this.wallet(game);
+   const reply=await this.transport.request({set:'bet',action:'reset'}),bet=reply.bet,wallet=this.wallet(reply);
+   if(!bet||!Array.isArray(bet.events)||bet.events.some(e=>e.type!=='helper')||bet.total?.bet!==0||(bet.total?.win??0)!==0||wallet.balance!==initialWallet.balance)throw Error('Unexpected startup result.');
+   if(typeof bet.ctx!=='string'||!bet.ctx||!this.bets.includes(bet.bet_sum))throw Error('Missing initial game context or bet.');
+   const board=this.adapter.initial(bet.reels),helpers=rgsHelpers(bet.events,board);
+   this.ctx=bet.ctx;this.helpers=helpers;this.s={...this.s,board,balance:wallet.balance,currency:wallet.currency,bet:bet.bet_sum};
+   this.ready=this.transport.healthy;if(!this.ready)throw Error('Connection lost during startup.');return this.snapshot();
+  }catch(e){this.fail(e.message);throw e;}
+ }
+ async setBet(value){
+  if(!this.playable)throw Error('Session is not ready.');if(!this.bets.includes(value))throw Error('Unsupported bet.');
+  try{
+   const reply=await this.transport.request({set:'options',bet_sum:value,ctx:this.ctx});
+   if(reply.options?.bet_sum!==value)throw Error('Server did not confirm the selected bet.');
+   this.ctx=reply.ctx||this.ctx;this.s.bet=value;return this.snapshot();
+  }catch(e){this.fail(e.message);throw e;}
+ }
+ async play(a,b){
+  if(!this.playable)throw Error('Session is not ready.');const move=rgsMove(a,b);
+  let sent=false;
+  try{
+   sent=true;const reply=await this.transport.request({set:'bet',action:'move',...move,ctx:this.ctx});
+   const bet=reply.bet,wallet=this.wallet(reply);
+   if(typeof bet?.ctx!=='string'||!bet.ctx||!this.bets.includes(bet.bet_sum))throw Error('Incomplete move response.');
+   if(bet.bet_sum!==this.s.bet)throw Error('Server used a different bet.');
+   const result=this.adapter.replay(this.s.board,bet,[a,b]);
+   const win=bet.total?.win??0,cost=bet.total?.bet;
+   if(!Number.isFinite(win)||win<0||!Number.isFinite(cost)||cost<0)throw Error('Invalid server totals.');
+   if(!result.accepted&&(win||cost))throw Error('Rejected swap has unexpected totals.');
+   this.ctx=bet.ctx;this.helpers=result.helpers;
+   this.s={...this.s,board:result.board,balance:wallet.balance,currency:wallet.currency,version:this.s.version+1};
+   if(result.accepted)this.s.history=[{time:Date.now(),cost,win,mult:1,bonus:false},...this.s.history].slice(0,100);
+   return {...result,state:this.snapshot(),win};
+  }catch(e){this.fail(e.message,sent);throw e;}
+ }
+}
+
+// Presentation only: receives legal pairs, never queries RGS or moves pieces.
+class SwipeHint {
+ constructor(parent,position){
+  this.position=position;this.layer=new PIXI.Container();this.layer.eventMode='none';this.layer.interactiveChildren=false;this.layer.label='swipe-hint';parent.addChild(this.layer);
+  this.glow=new PIXI.Graphics();this.glow.filters=[new PIXI.BlurFilter({strength:5,quality:4})];this.glow.blendMode='add';
+  this.trail=new PIXI.Graphics();this.trail.blendMode='add';
+  this.caption=new PIXI.Container();const plate=new PIXI.Graphics().roundRect(-176,-27,352,54,24).fill({color:0x060c1b,alpha:.72});
+  const text=new PIXI.Text({text:'SWIPE TO PLAY',style:{fontFamily:'Alexandria',fontSize:30,fontWeight:'900',fill:0xffffff,stroke:{color:0x171324,width:4},dropShadow:{color:0x000000,alpha:.5,blur:2,distance:2}}});text.anchor.set(.5);this.caption.addChild(plate,text);
+  this.hand=new PIXI.Container();
+  const shape=()=>new PIXI.Graphics().moveTo(-7,35).lineTo(-7,9).bezierCurveTo(-7,-1,-3,-5,2,-5).bezierCurveTo(8,-5,10,0,10,8).lineTo(10,26)
+   .bezierCurveTo(14,21,22,23,23,29).bezierCurveTo(28,24,36,27,36,33).bezierCurveTo(42,29,49,33,49,40)
+   .lineTo(49,55).bezierCurveTo(49,63,45,69,39,71).lineTo(7,71).bezierCurveTo(1,70,-2,65,-6,58)
+   .lineTo(-20,39).bezierCurveTo(-28,28,-17,23,-11,30).lineTo(-7,35).closePath();
+  const shadow=shape().fill({color:0x040719,alpha:.55});shadow.position.set(2,4);shadow.filters=[new PIXI.BlurFilter({strength:3,quality:3})];
+  const glove=shape().fill(0xffffff).stroke({color:0x3b294f,width:3.5,join:'round'});
+  const cuff=new PIXI.Graphics().moveTo(9,64).quadraticCurveTo(25,67,40,63).stroke({color:0xe3ddeb,width:2,cap:'round'});
+  this.hand.addChild(shadow,glove,cuff);this.hand.scale.set(.83);this.hand.rotation=-.14;
+  this.layer.addChild(this.caption,this.glow,this.trail,this.hand);this.cursor=0;this.reset(1400);
+ }
+ reset(delay=4200){this.idle=0;this.elapsed=0;this.delay=delay;this.pair=null;this.layer.visible=false;this.glow.clear();this.trail.clear();}
+ tick(dt,allowed,getPairs){
+  if(!allowed){this.reset();return;}
+  this.idle+=dt;if(this.idle<this.delay)return;
+  if(!this.pair){const pairs=getPairs();if(!pairs.length){this.layer.visible=false;return;}
+   this.pair=[...pairs[this.cursor%pairs.length]];this.elapsed=0;
+   const a=this.position(this.pair[0]),b=this.position(this.pair[1]);
+   const top=Math.min(a.y,b.y),bottom=Math.max(a.y,b.y);
+   this.caption.position.set(Math.max(201,Math.min(497,(a.x+b.x)/2)),top>130?top-87:Math.min(640,bottom+105));
+  }
+  this.elapsed+=dt;
+  // Two swipes per pair, then show another currently legal move.
+  if(this.elapsed>=4800){this.cursor++;this.pair=null;this.layer.visible=false;return;}
+  const phase=this.elapsed%2400,a=this.position(this.pair[0]),b=this.position(this.pair[1]);
+  const progress=t=>{const v=Math.max(0,Math.min(1,(t-330)/1000));return v*v*(3-2*v);};
+  const p=progress(phase),alpha=Math.min(1,phase/160,Math.max(0,(1980-phase)/280));
+  this.layer.visible=true;this.caption.alpha=Math.min(1,this.elapsed/200);this.hand.alpha=alpha;
+  this.hand.position.set(a.x+(b.x-a.x)*p+4,a.y+(b.y-a.y)*p+10);
+  this.hand.scale.set(.83*(1-.07*Math.sin(Math.PI*Math.min(1,phase/440))));
+  this.glow.clear();this.trail.clear();
+  const dx=b.x-a.x,dy=b.y-a.y,len=Math.hypot(dx,dy),nx=-dy/len,ny=dx/len;
+  // A tapered ribbon with a white core. Its tail follows the same eased motion
+  // at an earlier time, so it stretches during a swipe and dies away at rest.
+  const tail=progress(phase-480),length=p-tail,fade=alpha*Math.min(1,length*6);
+  if(length>.003&&fade>0){
+   const points=[],core=[];for(let i=0;i<=16;i++){const u=i/16,k=tail+length*u,w=Math.sin(Math.PI*u*.82)*7.5;
+    points.push({x:a.x+dx*k,y:a.y+dy*k,w});}
+   const polygon=width=>[...points.flatMap(v=>[v.x+nx*v.w*width,v.y+ny*v.w*width]),...points.toReversed().flatMap(v=>[v.x-nx*v.w*width,v.y-ny*v.w*width])];
+   this.glow.poly(polygon(2.2)).fill({color:0xffdc64,alpha:.75*fade});
+   this.trail.poly(polygon(1)).fill({color:0xfff2a4,alpha:.85*fade});this.trail.poly(polygon(.36)).fill({color:0xffffff,alpha:fade});
+   const head={x:a.x+dx*p,y:a.y+dy*p};this.glow.circle(head.x,head.y,13).fill({color:0xffe488,alpha:.55*fade});
+  }
+ }
+}
+
 const $=s=>document.querySelector(s), money=n=>n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 await mountKingdom($('#game')).catch(error=>console.warn('Kingdom background fallback',error));
 const KEY='sweet-cascade-v1';let saved;try{saved=JSON.parse(localStorage.getItem(KEY));}catch{}
-const rgs=new DemoRGS(saved),sound=new Sound();let state=rgs.snapshot(),busy=false,held=false,auto=0,speed=1,selected=null,displayWin=state.bonus?.win||0,displayMult=state.bonus?.mult||1,lastInput=Date.now();
+const serverMode=new URLSearchParams(location.search).get('mode')!=='demo';
+const rgs=serverMode?new ServerRGS({onFault:()=>queueMicrotask(showConnectionFault)}):new DemoRGS(saved),sound=new Sound();let state=rgs.snapshot(),busy=serverMode,held=false,auto=0,speed=1,selected=null,displayWin=state.bonus?.win||0,displayMult=state.bonus?.mult||1,lastInput=Date.now();
 await Promise.all([document.fonts.load('700 28px Alexandria'),sound.loadSamples()]);
 const app=new PIXI.Application();await app.init({width:711,height:711,backgroundAlpha:0,antialias:true,resolution:Math.min(devicePixelRatio,2),autoDensity:true,preference:'webgl'});$('#board').appendChild(app.canvas);
 const stage=new PIXI.Container();app.stage.addChild(stage);stage.position.set(5.4,5.4);const frame=new PIXI.Sprite(frameTexture());frame.position.set(-5.4,-5.4);stage.addChild(frame);const bg=new PIXI.Graphics();stage.addChild(bg);
@@ -246,44 +491,54 @@ function signature(c){return [c.kind,c.color,c.hp,c.magic,c.mult,c.dir].join(':'
 try {const atlas=await PIXI.Assets.load('public/candies.png');const canvas=document.createElement('canvas');canvas.width=1536;canvas.height=1024;const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(atlas.source.resource,0,0);for(let i=0;i<6;i++){const ox=i%3*512,oy=Math.floor(i/3)*512;const pixels=ctx.getImageData(ox,oy,512,512).data;let left=512,top=512,right=0,bottom=0;for(let y=0;y<512;y++)for(let x=0;x<512;x++)if(pixels[(y*512+x)*4+3]>100){left=Math.min(left,x);top=Math.min(top,y);right=Math.max(right,x);bottom=Math.max(bottom,y);}candyBounds[i]={cx:(left+right)/2,cy:(top+bottom)/2,size:Math.max(right-left+1,bottom-top+1)};textures[i]=new PIXI.Texture({source:atlas.source,frame:new PIXI.Rectangle(ox,oy,512,512)});}}catch(e){console.warn('Using procedural fallback candy art',e);}
 try{const candy=await PIXI.Assets.load('public/pink-candy.png');const canvas=document.createElement('canvas');canvas.width=canvas.height=512;const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(candy.source.resource,0,0,512,512);const data=ctx.getImageData(0,0,512,512).data;let left=512,top=512,right=0,bottom=0;for(let y=0;y<512;y++)for(let x=0;x<512;x++)if(data[(y*512+x)*4+3]>100){left=Math.min(left,x);top=Math.min(top,y);right=Math.max(right,x);bottom=Math.max(bottom,y);}textures[1]=candy;candyBounds[1]={cx:(left+right)/2,cy:(top+bottom)/2,size:Math.max(right-left+1,bottom-top+1)};}catch(e){console.warn('Pink candy fallback',e);}
 const pos=i=>({x:66+i%7*94,y:66+Math.floor(i/7)*94});
+const swipeHint=new SwipeHint(stage,pos);
+document.addEventListener('pointerdown',()=>swipeHint.reset(),{capture:true});
+document.addEventListener('keydown',()=>swipeHint.reset(),{capture:true});
 function tween(obj,to,ms=200,ease=t=>1-(1-t)**3){const from={};for(const k in to)from[k]=obj[k];return new Promise(resolve=>anims.push({obj,to,from,ms:ms/speed,t:0,ease,resolve}));}
 function pause(ms){return tween({v:0},{v:1},ms);}
 function label(text,size=28,color='#ffffff'){const t=new PIXI.Text({text,style:{fontFamily:'Alexandria',fontSize:size,fontWeight:'800',fill:color,stroke:{color:'#293352',width:4},dropShadow:{color:'#071024',blur:2,distance:3,alpha:.7}}});t.anchor.set(.5);return t;}
 function make(c){const n=new PIXI.Container();n.cid=c.id;n.signature=signature(c);n.kind=c.kind;n.color=c.color;let texture=c.kind==='candy'?textures[c.color]:c.kind==='rocket'?special.rocket[c.dir]:c.kind==='ice'&&iceTextures.length?iceTextures[Math.max(0,Math.min(2,(c.maxHp??3)-c.hp))]:special[c.kind];const s=new PIXI.Sprite(texture||textures[c.color]);s.anchor.set(.5);s.width=s.height=c.kind==='ice'&&iceTextures.length?104:80;if(c.kind==='candy'&&candyBounds[c.color]){const b=candyBounds[c.color];s.anchor.set(b.cx/512,b.cy/512);s.width=s.height=80*512/b.size*(c.color===1?.92:1);}if(boosterArt[c.kind]){const art=boosterArt[c.kind];s.texture=art.texture;s.anchor.set(art.cx/art.w,art.cy/art.h);s.width=84*art.w/art.size;s.height=84*art.h/art.size;if(c.kind==='rocket')s.rotation=c.dir*Math.PI/2;}n.baseSpriteScale=s.scale.x;n.baseSpriteScaleY=s.scale.y;n.baseSpriteRotation=s.rotation;n.phase=(Number(c.id)*2.399963)||Math.random()*6.28;n.idleRate=.85+((Number(c.id)*.618)%1)*.35;n.addChild(s);n.sprite=s;n.eventMode='static';n.cursor=c.kind==='ice'?'default':'pointer';n.on('pointerdown',e=>down(n.index,e));n.on('pointerup',e=>up(n.index,e));if(c.magic)n.magicRing=symbolGlow(n,0xffdf73,.9,1.22,3.5);if(c.mult){const b=label('×'+c.mult,c.kind==='ice'?25:27,'#fff7a5');b.position.set(0,0);n.multiplierLabel=b;if(c.kind==='ice'){const damage=(c.maxHp??3)-c.hp;b.visible=damage>0;b.alpha=damage===1?.85:1;n.addChildAt(b,0);s.alpha=damage===0?1:damage===1?.85:.65;if(damage>0){const mask=new PIXI.Graphics().rect(-60,-60,120,120).fill(0xffffff);const hole=damage===1?[-18,-10,-3,-18,7,-5,2,9,-11,15,-23,2]:[-34,-16,-12,-30,2,-22,24,-29,34,-8,23,6,31,24,9,32,-6,22,-27,29,-36,8];mask.poly(hole).cut();n.addChild(mask);s.mask=mask;}}else n.addChild(b);}if(c.kind==='ice'&&!iceTextures.length&&c.hp<3){const cracks=new PIXI.Graphics().moveTo(-25,-42).lineTo(2,-9).lineTo(-16,8).lineTo(22,40).stroke({color:0xd8fbff,width:3});n.addChild(cracks);}pieces.addChild(n);nodes.set(c.id,n);return n;}
 function draw(board){const ids=new Set(board.filter(Boolean).map(c=>c.id));for(const[id,n]of nodes)if(!ids.has(id)){n.destroy({children:true});nodes.delete(id);}board.forEach((c,i)=>{if(!c)return;let n=nodes.get(c.id);if(n&&n.signature!==signature(c)){n.destroy({children:true});nodes.delete(c.id);n=null;}if(!n)n=make(c);n.index=i;Object.assign(n,pos(i));});visual=clone(board);}
 const boardMask=new PIXI.Graphics().roundRect(20,20,658,658,8).fill(0xffffff);stage.addChild(boardMask);pieces.mask=boardMask;
-async function fall(board){const ids=new Set(board.filter(Boolean).map(c=>c.id));for(const[id,n]of nodes)if(!ids.has(id)){n.destroy({children:true});nodes.delete(id);}let landingPlayed=false;const jobs=[],newCount=Array(7).fill(0),ranks=Array(7).fill(0);board.forEach((c,i)=>{if(!nodes.has(c.id))newCount[i%7]++;});board.forEach((c,i)=>{let n=nodes.get(c.id),p=pos(i),col=i%7;if(!n){n=make(c);n.x=p.x;n.y=66-(newCount[col]-ranks[col]++)*94;}n.index=i;const distance=Math.abs(n.y-p.y);if(distance>1){jobs.push((async()=>{await pause(col*7);const duration=160+Math.sqrt(distance)*9;await Promise.all([tween(n,{y:p.y+5},duration,t=>t*t),tween(n.scale,{x:.81,y:1.24},duration*.48)]);if(!landingPlayed){landingPlayed=true;sound.play('land',sound.cascade);}await Promise.all([tween(n,{y:p.y+3},55),tween(n.scale,{x:1.22,y:.76},55)]);await Promise.all([tween(n,{y:p.y-4},85),tween(n.scale,{x:.93,y:1.10},85)]);await Promise.all([tween(n,{y:p.y+1},80),tween(n.scale,{x:1.045,y:.95},80)]);await Promise.all([tween(n,{y:p.y},95),tween(n.scale,{x:1,y:1},95)]);})());}});await Promise.all(jobs);visual=clone(board);}
+async function fall(board){const ids=new Set(board.filter(Boolean).map(c=>c.id));for(const[id,n]of nodes)if(!ids.has(id)){n.destroy({children:true});nodes.delete(id);}let landingPlayed=false;const jobs=[],newCount=Array(7).fill(0),ranks=Array(7).fill(0);board.forEach((c,i)=>{if(!nodes.has(c.id))newCount[i%7]++;});board.forEach((c,i)=>{let n=nodes.get(c.id),p=pos(i),col=i%7;if(n&&n.signature!==signature(c)){const previousPosition={x:n.x,y:n.y};n.destroy({children:true});nodes.delete(c.id);n=make(c);Object.assign(n,previousPosition);}if(!n){n=make(c);n.x=p.x;n.y=66-(newCount[col]-ranks[col]++)*94;}n.index=i;const distance=Math.abs(n.y-p.y);if(distance>1){jobs.push((async()=>{await pause(col*7);const duration=160+Math.sqrt(distance)*9;await Promise.all([tween(n,{y:p.y+5},duration,t=>t*t),tween(n.scale,{x:.81,y:1.24},duration*.48)]);if(!landingPlayed){landingPlayed=true;sound.play('land',sound.cascade);}await Promise.all([tween(n,{y:p.y+3},55),tween(n.scale,{x:1.22,y:.76},55)]);await Promise.all([tween(n,{y:p.y-4},85),tween(n.scale,{x:.93,y:1.10},85)]);await Promise.all([tween(n,{y:p.y+1},80),tween(n.scale,{x:1.045,y:.95},80)]);await Promise.all([tween(n,{y:p.y},95),tween(n.scale,{x:1,y:1},95)]);})());}});await Promise.all(jobs);visual=clone(board);}
 function burst(i,color,count=16){let p=pos(i);for(let k=0;k<count;k++){const g=new PIXI.Graphics(),r=2+Math.random()*4;const tint=k%5===0?0xffffff:color;if(k%5===0){g.moveTo(0,-r*2).lineTo(r*.5,-r*.5).lineTo(r*2,0).lineTo(r*.5,r*.5).lineTo(0,r*2).lineTo(-r*.5,r*.5).lineTo(-r*2,0).lineTo(-r*.5,-r*.5).closePath().fill(tint);}else g.circle(0,0,r).fill(tint);g.circle(0,0,r*2.5).fill({color:tint,alpha:.11});g.x=p.x;g.y=p.y;g.blendMode='add';fx.addChild(g);const a=Math.random()*Math.PI*2,v=65+Math.random()*155;particles.push({g,vx:Math.cos(a)*v,vy:Math.sin(a)*v-65,life:.45+Math.random()*.4,total:.85});}}
 function cellGlow(i){const c=visual[i],color=c?.kind==='ice'?0xb7edff:palette[c?.color]??0xffdc86;const light=color;const glow=new PIXI.Container();Object.assign(glow,pos(i));bg.addChild(glow);const wash=new PIXI.Graphics().circle(0,0,42).fill({color,alpha:.68});wash.filters=[new PIXI.BlurFilter({strength:14,quality:4})];wash.blendMode='normal';const halo=new PIXI.Graphics().roundRect(-44,-44,88,88,9).stroke({color:light,width:5,alpha:.55});halo.filters=[new PIXI.BlurFilter({strength:5,quality:4})];halo.blendMode='add';const outline=new PIXI.Graphics().roundRect(-44,-44,88,88,9).stroke({color,width:2.5,alpha:.9});outline.filters=[new PIXI.BlurFilter({strength:.9,quality:3})];glow.addChild(wash,halo,outline);glow.alpha=0;tween(glow,{alpha:1},100).then(()=>pause(300)).then(()=>tween(glow,{alpha:0},220)).then(()=>glow.destroy({children:true}));}
 function popFlash(i){const g=new PIXI.Graphics();for(let r=40;r>0;r-=4)g.circle(0,0,r).fill({color:r<14?0xffffff:0x5ee0ff,alpha:r<14?.7:.1});Object.assign(g,pos(i));g.blendMode='add';fx.addChild(g);g.scale.set(.1);tween(g.scale,{x:1.5,y:1.5},100).then(()=>tween(g.scale,{x:.2,y:.2},180));tween(g,{alpha:0},330).then(()=>g.destroy());}
 function float(text,i,color='#ffef9c'){let t=label(text,30,color);Object.assign(t,pos(i));fx.addChild(t);tween(t,{y:t.y-70,alpha:0},800).then(()=>t.destroy());}
 async function shuffleBoard(board){sound.play('shuffle');float('SHUFFLE',24);const moving=()=>[...nodes.values()].filter(n=>n.kind!=='ice');await Promise.all(moving().map(n=>Promise.all([tween(n,{x:350,y:350,rotation:Math.PI,alpha:0},400),tween(n.scale,{x:.1,y:.1},400)])));draw(board);for(const n of moving()){n.rotation=0;n.scale.set(.1);n.alpha=0;}await Promise.all(moving().map(n=>Promise.all([tween(n.scale,{x:1,y:1},300),tween(n,{alpha:1},250)])));}
 async function effect(e){let p=pos(e.i);if(e.kind==='bomb'){sound.play('bomb');let ring=new PIXI.Graphics().circle(0,0,20).stroke({color:0xffd67b,width:12});Object.assign(ring,p);fx.addChild(ring);tween(ring.scale,{x:7,y:7},330);tween(ring,{alpha:0},330).then(()=>ring.destroy());await tween(stage,{x:11.4,y:2.4},40);await tween(stage,{x:1.4,y:9.4},50);await tween(stage,{x:5.4,y:5.4},60);}else{sound.play('rocket');let trail=new PIXI.Graphics();let dx=[0,1,0,-1][e.dir],dy=[-1,0,1,0][e.dir];trail.moveTo(p.x,p.y).lineTo(p.x+dx*700,p.y+dy*700).stroke({color:0xfff6ac,width:16,alpha:.85});fx.addChild(trail);tween(trail,{alpha:0},300).then(()=>trail.destroy());}}
-function hud(){const b=state.bonus;$('#balance').textContent=money(state.balance);$('#bet').textContent=money(state.bet);$('#cost').textContent=b?'FREE MOVE':money(rgs.cost())+' per move';$('#win').textContent=money(displayWin);$('#mult').textContent=displayMult+'×';$('#win-label').textContent=b?'BONUS WIN':'WIN';$('#mode').textContent=b?'FROSTED FACTORY':({base:'NORMAL PLAY',luck:'EXTRA LUCK · ×2',enhanced:'ENHANCED MOVES · ×50',mayhem:'MULTI MAYHEM · ×1000'}[state.mode]);$('#meter-title').textContent=b?'MOVES LEFT: '+b.moves:'ICE BONUS';$('#moves-label').textContent=b?'Magic candy = +1 move':'Collect 3 magic candies';$('#meter').style.display=b?'none':'flex';[...$('#meter').children].forEach((e,i)=>e.classList.toggle('on',i<state.meter));$('#game').classList.toggle('bonus-active',!!b);for(const id of ['minus','plus','bonus'])$('#'+id).disabled=busy||!!b;$('#play').disabled=busy;$('#auto').classList.toggle('active',auto>0);$('#auto').title=auto?'Remaining: '+auto:'Autoplay';}
-function persist(){localStorage.setItem(KEY,JSON.stringify(rgs.snapshot()));}
+function hud(){const b=state.bonus;$('#balance').textContent=money(state.balance);$('#bet').textContent=money(state.bet);$('#cost').textContent=b?'FREE MOVE':money(rgs.cost())+' per move';$('#win').textContent=money(displayWin);$('#mult').textContent=displayMult+'×';$('#win-label').textContent=b?'BONUS WIN':'WIN';$('#mode').textContent=b?'FROSTED FACTORY':({base:'NORMAL PLAY',luck:'EXTRA LUCK · ×2',enhanced:'ENHANCED MOVES · ×50',mayhem:'MULTI MAYHEM · ×1000'}[state.mode]);$('#meter-title').textContent=b?'MOVES LEFT: '+b.moves:'ICE BONUS';$('#moves-label').textContent=b?'Magic candy = +1 move':'Collect 3 magic candies';$('#meter').style.display=b?'none':'flex';[...$('#meter').children].forEach((e,i)=>e.classList.toggle('on',i<state.meter));$('#game').classList.toggle('bonus-active',!!b);for(const id of ['minus','plus','bonus'])$('#'+id).disabled=busy||!!b;$('#play').disabled=busy||(serverMode&&!rgs.playable);if(serverMode){for(const id of ['minus','plus','auto'])$('#'+id).disabled=busy||!rgs.playable;$('#bonus').disabled=true;$('#bonus').title='Not available in this RGS version';$('#meter-title').textContent='RGS TEST';$('#moves-label').textContent='Bonuses coming later';$('#meter').style.display='none';$('#mult').style.visibility='hidden';$('#connection').textContent=rgs.playable?'● Test server · '+(state.currency||'credits'):(rgs.transport.fault?'● Connection lost':'● Connecting…');}$('#auto').classList.toggle('active',auto>0);$('#auto').title=auto?'Remaining: '+auto:'Autoplay';}
+function persist(){if(serverMode)return;localStorage.setItem(KEY,JSON.stringify(rgs.snapshot()));}
 let toastTimer;function toast(t){$('#toast').textContent=t;$('#toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),3000);}
 function stop(){held=false;auto=0;hud();}
-function modal(html){stop();$('#dialog-content').innerHTML=html;$('#dialog').showModal();}
+function modal(html){swipeHint.reset();stop();$('#dialog-content').innerHTML=html;$('#dialog').showModal();}
 function close(){sound.cancelCelebration();$('#dialog').close();lastInput=Date.now();}$('#close').onclick=close;$('#dialog').addEventListener('close',()=>sound.cancelCelebration());
 document.addEventListener('pointerdown',()=>sound.unlock(),{once:true});
 let pointer=null;
 function restoreDrag(d=pointer){if(!d)return;for(const i of [d.i,d.neighbor]){const n=nodes.get(visual[i]?.id);if(n)Object.assign(n,pos(i));}}
 function cancelDrag(){if(!pointer)return;restoreDrag();pointer=null;select(null);}
-function down(i,e){if(busy||$('#dialog').open||visual[i]?.kind==='ice')return;sound.unlock();lastInput=Date.now();pointer={i,x:e.global.x,y:e.global.y,target:null,moved:false,second:selected!==null&&selected!==i?selected:null};select(i);}
+function down(i,e){if(busy||(serverMode&&!rgs.playable)||$('#dialog').open||!visual[i]||visual[i]?.kind==='ice')return;sound.unlock();lastInput=Date.now();pointer={i,x:e.global.x,y:e.global.y,target:null,moved:false,second:selected!==null&&selected!==i?selected:null};select(i);}
 function drag(e){if(!pointer||busy)return;const d=pointer,dx=e.global.x-d.x,dy=e.global.y-d.y;if(Math.hypot(dx,dy)<8&&!d.moved)return;d.moved=true;const horizontal=Math.abs(dx)>Math.abs(dy),delta=horizontal?dx:dy;const j=d.i+(horizontal?Math.sign(delta):Math.sign(delta)*7);const valid=j>=0&&j<49&&Math.abs(j%7-d.i%7)+Math.abs(Math.floor(j/7)-Math.floor(d.i/7))===1&&visual[j]?.kind!=='ice';if(valid&&!d.swishPlayed){sound.play('swap');d.swishPlayed=true;}d.target=valid&&Math.abs(delta)>32?j:null;if(d.neighbor!==undefined&&d.neighbor!==j){const old=nodes.get(visual[d.neighbor]?.id);if(old)Object.assign(old,pos(d.neighbor));}d.neighbor=valid?j:undefined;const n=nodes.get(visual[d.i]?.id),origin=pos(d.i);if(!n)return;const amount=valid?Math.min(94,Math.abs(delta)):Math.min(18,Math.abs(delta)*.2);n.x=origin.x+(horizontal?Math.sign(delta)*amount:0);n.y=origin.y+(horizontal?0:Math.sign(delta)*amount);if(valid){const other=nodes.get(visual[j]?.id),dest=pos(j),progress=Math.min(1,amount/70);other.x=dest.x+(origin.x-dest.x)*progress;other.y=dest.y+(origin.y-dest.y)*progress;}pieces.setChildIndex(n,pieces.children.length-1);}
 function up(i,e){if(!pointer||busy)return;const d=pointer;if(e)drag(e);const target=d.moved?d.target:d.second;pointer=null;select(null);if(target!==null){play(d.i,target,d.swishPlayed===true);}else{restoreDrag(d);if(!d.moved)select(d.i);}}
 app.stage.eventMode='static';app.stage.hitArea=new PIXI.Rectangle(0,0,700,700);app.stage.on('globalpointermove',e=>{const col=Math.floor((e.global.x-25.4)/94),row=Math.floor((e.global.y-25.4)/94);hoveredCell=col>=0&&col<7&&row>=0&&row<7?row*7+col:null;drag(e);});app.canvas.addEventListener('pointerleave',()=>{hoveredCell=null;});app.stage.on('pointerup',e=>{if(pointer)up(pointer.i,e);});app.stage.on('pointerupoutside',cancelDrag);app.canvas.addEventListener('pointercancel',cancelDrag);
 function select(i){selected=i;}
-async function play(a,b,swishPlayed=false){if(busy||pointer||$('#dialog').open)return;sound.unlock();sound.cancelCelebration();sound.cascade=0;lastInput=Date.now();if(a===undefined){const m=moves(state.board);if(!m.length){stop();toast('No moves available. The board needs a reshuffle.');return;}[a,b]=m[Math.floor(Math.random()*m.length)];}busy=true;select(null);hud();$('#message').style.opacity=0;
- try{let before=rgs.snapshot(),result;try{result=rgs.play(a,b,crypto.randomUUID(),state.version);}catch(e){rgs.s=before;throw e;}
-  if(!result.accepted){sound.play('invalid');const na=nodes.get(visual[a]?.id),nb=nodes.get(visual[b]?.id);if(na&&nb){await Promise.all([tween(na,pos(b),110),tween(nb,pos(a),110)]);await Promise.all([tween(na,pos(a),150),tween(nb,pos(b),150)]);}return;}
-  persist();state.balance=before.balance-(before.bonus?0:before.bet*({base:1,luck:2,enhanced:50,mayhem:1000}[before.mode]));if(auto&&!before.bonus)auto--;hud();
-  for(const e of result.events){if(e.type==='swap'){if(!swishPlayed)sound.play('swap');if(state.bonus)state.bonus.moves=e.moves;hud();let na=nodes.get(visual[a]?.id),nb=nodes.get(visual[b]?.id);await Promise.all([tween(na,pos(b),165),tween(nb,pos(a),165)]);visual=clone(e.board);nodes.get(visual[a].id).index=a;nodes.get(visual[b].id).index=b;}
+async function play(a,b,swishPlayed=false){if(busy||(serverMode&&!rgs.playable)||pointer||$('#dialog').open)return;sound.unlock();sound.cancelCelebration();sound.cascade=0;lastInput=Date.now();if(a===undefined){const m=serverMode?rgs.moves():moves(state.board);if(!m.length){stop();toast('No moves available. Reload to start a new test session.');return;}[a,b]=m[Math.floor(Math.random()*m.length)];}if(!Number.isInteger(a)||!Number.isInteger(b)||!visual[a]||!visual[b]||Math.abs(a%7-b%7)+Math.abs(Math.floor(a/7)-Math.floor(b/7))!==1){restoreDrag({i:a,neighbor:b});return;}busy=true;swipeHint.reset();select(null);hud();$('#message').style.opacity=0;
+ try{let before=rgs.snapshot(),result;const previewSwap=serverMode;
+  try{const response=rgs.play(a,b,crypto.randomUUID(),state.version);
+   if(previewSwap){if(!swishPlayed){sound.play('swap');swishPlayed=true;}const na=nodes.get(visual[a].id),nb=nodes.get(visual[b].id),pa=pos(a),pb=pos(b);
+    const distance=Math.max(Math.hypot(na.x-pb.x,na.y-pb.y),Math.hypot(nb.x-pa.x,nb.y-pa.y));
+    const preview=distance>1?Promise.all([tween(na,pb,165*distance/94),tween(nb,pa,165*distance/94)]):Promise.resolve();
+    [result]=await Promise.all([response,preview]);
+   }else result=await response;
+  }catch(e){if(!serverMode)rgs.s=before;throw e;}
+  if(!result.accepted){sound.play('invalid');const na=nodes.get(visual[a]?.id),nb=nodes.get(visual[b]?.id);if(na&&nb){if(!previewSwap)await Promise.all([tween(na,pos(b),110),tween(nb,pos(a),110)]);await Promise.all([tween(na,pos(a),150),tween(nb,pos(b),150)]);}return;}
+  persist();state.balance=serverMode?result.state.balance:before.balance-(before.bonus?0:before.bet*({base:1,luck:2,enhanced:50,mayhem:1000}[before.mode]));if(auto&&!before.bonus)auto--;hud();
+  for(const e of result.events){if(e.type==='swap'){const swapA=e.a??a,swapB=e.b??b;if(!swishPlayed)sound.play('swap');if(state.bonus)state.bonus.moves=e.moves;hud();let na=nodes.get(visual[swapA]?.id),nb=nodes.get(visual[swapB]?.id);if(!previewSwap)await Promise.all([tween(na,pos(swapB),165),tween(nb,pos(swapA),165)]);visual=clone(e.board);nodes.get(visual[swapA].id).index=swapA;nodes.get(visual[swapB].id).index=swapB;}
    if(e.type==='destroy'){const cells=[...e.cells,...e.ice];cells.forEach(cellGlow);await Promise.all(e.effects.map(effect));sound.cascade=Math.max(0,e.step);sound.play('pop',sound.cascade);
     // Anticipation: 50% scale, whitening and halo together; then a fast rebound.
     await Promise.all(cells.map(async i=>{const n=nodes.get(visual[i]?.id);if(!n)return;n.white={v:0};n.whiteFilter=new PIXI.ColorMatrixFilter();n.whiteBlur=new PIXI.BlurFilter({strength:0,quality:4});n.sprite.filters=[n.whiteFilter,n.whiteBlur];const halo=symbolGlow(n,0xffffff,0);await Promise.all([tween(n.scale,{x:.5,y:.5},270,t=>t*t),tween(n.white,{v:1},270),tween(halo,{alpha:.55},270)]);await tween(n.scale,{x:.64,y:.64},110,t=>1-(1-t)**2);}));
     if(e.ice.length)sound.play('ice');else if(e.damage.length)sound.play('iceHit');
-    await Promise.all(cells.map(async i=>{const c=visual[i],n=nodes.get(c?.id);if(!n)return;popFlash(i);burst(i,c.kind==='ice'?0xb7edff:palette[c.color],c.kind==='ice'?36:32);if(c.magic){sound.play('magic');float(state.bonus?'+1 MOVE':'★',i);if(!state.bonus)state.meter=Math.min(3,state.meter+1);}if(c.mult)float('×'+c.mult,i);return Promise.all([tween(n.scale,{x:.02,y:.02},115,t=>t*t),tween(n,{alpha:0},115)]);}));
+    await Promise.all(cells.map(async i=>{const c=visual[i],n=nodes.get(c?.id);if(!n)return;popFlash(i);burst(i,c.kind==='ice'?0xb7edff:palette[c.color],c.kind==='ice'?36:32);if(c.magic&&!serverMode){sound.play('magic');float(state.bonus?'+1 MOVE':'★',i);if(!state.bonus)state.meter=Math.min(3,state.meter+1);}if(c.mult)float('×'+c.mult,i);return Promise.all([tween(n.scale,{x:.02,y:.02},115,t=>t*t),tween(n,{alpha:0},115)]);}));
     for(const i of cells){const id=visual[i]?.id,n=nodes.get(id);if(n){n.destroy({children:true});nodes.delete(id);}visual[i]=null;}
     for(const i of e.damage)if(!e.ice.includes(i)){const old=nodes.get(visual[i]?.id);if(old){old.destroy({children:true});nodes.delete(visual[i].id);}let c=e.board[i],n=make(c);n.index=i;Object.assign(n,pos(i));burst(i,0xb7edff,14);tween(n.scale,{x:1.08,y:.93},65).then(()=>tween(n.scale,{x:1,y:1},140));visual[i]=clone(c);}
     for(const id of e.armed){const n=nodes.get(id);if(n){if(!n.armedGlow)n.armedGlow=symbolGlow(n,0xffdc86,.85);float('✦',n.index);}}
@@ -293,18 +548,32 @@ async function play(a,b,swishPlayed=false){if(busy||pointer||$('#dialog').open)r
   state=result.state;displayWin=result.win;draw(state.board);hud();if(result.bonusStarted){sound.play('bonus');modal('<h2>FROSTED FACTORY</h2><p>5 free moves. Break the ice and collect multipliers. Magic candies award extra moves.</p><button class="modal-action" id="continue">START BONUS</button>');$('#continue').onclick=()=>{sound.play('transition');close();};displayWin=0;displayMult=1;}
   else if(result.bonusEnded){sound.celebrate(result.win/(before.bonus?.bet||state.bet));modal('<h2>BONUS COMPLETE</h2><p>Total win</p><h1>'+money(result.win)+'</h1><button class="modal-action" id="continue">CONTINUE</button>');$('#continue').onclick=()=>{sound.play('winEnd');close();};}
   else if(result.win>=state.bet*15){sound.celebrate(result.win/state.bet);float('+'+money(result.win),24);await pause(450);}
- }catch(e){console.error(e);stop();toast(e.message);}finally{busy=false;state=rgs.snapshot();hud();if((held||auto>0)&&!$('#dialog').open&&!document.hidden)setTimeout(()=>play(),220/speed);}
+ }catch(e){stop();if(serverMode){rgs.fail(e.message,true);showConnectionFault();}else{console.error(e);toast(e.message);}}finally{busy=false;state=rgs.snapshot();hud();if((held||auto>0)&&(!serverMode||rgs.playable)&&!$('#dialog').open&&!document.hidden)setTimeout(()=>play(),220/speed);}
 }
 $('#play').onclick=()=>play();$('#sound').onclick=()=>{sound.unlock();sound.enabled=!sound.enabled;$('#sound').style.opacity=sound.enabled?1:.45;};$('#turbo').onclick=()=>{speed=speed===1?1.8:1;$('#turbo').classList.toggle('active',speed!==1);sound.play('click');};
-const bets=[.1,.2,.5,1,2,5,10,20,50,100];function changeBet(dir){if(busy||state.bonus)return;let i=bets.indexOf(state.bet);rgs.s.bet=bets[Math.max(0,Math.min(bets.length-1,i+dir))];state=rgs.snapshot();persist();hud();sound.play('click');}$('#minus').onclick=()=>changeBet(-1);$('#plus').onclick=()=>changeBet(1);
-$('#bonus').onclick=()=>{if(busy||state.bonus)return;modal('<h2>CHOOSE A MODE</h2><div class="cards">'+[['base','Normal play','1× per move'],['luck','Extra Luck','2× per move · more magic candies'],['enhanced','Enhanced Moves','50× per move · bombs, rockets and multipliers'],['ice','Frosted Factory','100× · buy 5 free moves'],['mayhem','Multi Mayhem','1000× per move · multiplier board']].map(([id,name,desc])=>`<button class="card" data-mode="${id}"><b>${name}</b><span>${desc}</span><span>${money(state.bet*({base:1,luck:2,enhanced:50,ice:100,mayhem:1000}[id]))} credits</span></button>`).join('')+'</div>');document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{const mode=b.dataset.mode;$('#dialog-content').innerHTML='<h2>'+b.querySelector('b').textContent+'</h2><p>'+ (mode==='ice'?'Cost: '+money(state.bet*100)+' demo credits.':'Changing mode is free. Your next move uses the selected price.')+'</p><button id="confirm" class="modal-action">CONFIRM</button>';$('#confirm').onclick=()=>{try{state=mode==='ice'?rgs.buy():rgs.mode(mode);persist();displayWin=0;displayMult=1;draw(state.board);hud();close();sound.play(mode==='ice'?'bonus':'click');}catch(e){toast(e.message);}};});};
-$('#auto').onclick=()=>{if(auto){stop();return;}modal('<h2>AUTOPLAY</h2><p>Choose the number of paid moves. Stopping autoplay lets the current move finish.</p><div class="choices">'+[5,10,25,50,100,250,500,1000].map(n=>`<button data-count="${n}">${n}</button>`).join('')+'</div>');document.querySelectorAll('[data-count]').forEach(b=>b.onclick=()=>{auto=Number(b.dataset.count);close();hud();if(!busy)play();});};
-$('#settings').onclick=()=>{modal('<h2>SETTINGS</h2><label><input id="sfx-check" type="checkbox" '+(sound.enabled?'checked':'')+'> Sound effects</label><label><input id="music-check" type="checkbox" '+(sound.music?'checked':'')+'> Background music</label><p>Your board and bonus progress are saved in this browser.</p>');$('#sfx-check').onchange=e=>{sound.unlock();sound.enabled=e.target.checked;};$('#music-check').onchange=e=>{sound.unlock();sound.music=e.target.checked;};};
+const bets=[.1,.2,.5,1,2,5,10,20,50,100];async function changeBet(dir){if(busy||state.bonus||(serverMode&&!rgs.playable))return;const options=serverMode?rgs.bets:bets;let i=options.indexOf(state.bet),value=options[Math.max(0,Math.min(options.length-1,i+dir))];if(value===state.bet)return;busy=true;hud();try{if(serverMode)await rgs.setBet(value);else rgs.s.bet=value;state=rgs.snapshot();persist();sound.play('click');}catch(e){if(serverMode)showConnectionFault();else toast(e.message);}finally{busy=false;hud();}}$('#minus').onclick=()=>changeBet(-1);$('#plus').onclick=()=>changeBet(1);
+$('#bonus').onclick=()=>{if(serverMode||busy||state.bonus)return;modal('<h2>CHOOSE A MODE</h2><div class="cards">'+[['base','Normal play','1× per move'],['luck','Extra Luck','2× per move · more magic candies'],['enhanced','Enhanced Moves','50× per move · bombs, rockets and multipliers'],['ice','Frosted Factory','100× · buy 5 free moves'],['mayhem','Multi Mayhem','1000× per move · multiplier board']].map(([id,name,desc])=>`<button class="card" data-mode="${id}"><b>${name}</b><span>${desc}</span><span>${money(state.bet*({base:1,luck:2,enhanced:50,ice:100,mayhem:1000}[id]))} credits</span></button>`).join('')+'</div>');document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{const mode=b.dataset.mode;$('#dialog-content').innerHTML='<h2>'+b.querySelector('b').textContent+'</h2><p>'+ (mode==='ice'?'Cost: '+money(state.bet*100)+' demo credits.':'Changing mode is free. Your next move uses the selected price.')+'</p><button id="confirm" class="modal-action">CONFIRM</button>';$('#confirm').onclick=()=>{try{state=mode==='ice'?rgs.buy():rgs.mode(mode);persist();displayWin=0;displayMult=1;draw(state.board);hud();close();sound.play(mode==='ice'?'bonus':'click');}catch(e){toast(e.message);}};});};
+$('#auto').onclick=()=>{if(serverMode&&!rgs.playable)return;if(auto){stop();return;}modal('<h2>AUTOPLAY</h2><p>Choose the number of paid moves. Stopping autoplay lets the current move finish.</p><div class="choices">'+[5,10,25,50,100,250,500,1000].map(n=>`<button data-count="${n}">${n}</button>`).join('')+'</div>');document.querySelectorAll('[data-count]').forEach(b=>b.onclick=()=>{auto=Number(b.dataset.count);close();hud();if(!busy)play();});};
+$('#settings').onclick=()=>{modal('<h2>SETTINGS</h2><label><input id="sfx-check" type="checkbox" '+(sound.enabled?'checked':'')+'> Sound effects</label><label><input id="music-check" type="checkbox" '+(sound.music?'checked':'')+'> Background music</label><p>'+(serverMode?'Reload starts a new RGS test session.':'Your board and bonus progress are saved in this browser.')+'</p>');$('#sfx-check').onchange=e=>{sound.unlock();sound.enabled=e.target.checked;};$('#music-check').onchange=e=>{sound.unlock();sound.music=e.target.checked;};};
 $('#history').onclick=()=>modal('<h2>MOVE HISTORY</h2><table><tr><th>Time</th><th>Cost</th><th>Win</th><th>Multiplier</th></tr>'+state.history.slice(0,20).map(h=>`<tr><td>${new Date(h.time).toLocaleTimeString('en-US')}</td><td>${h.bonus?'Bonus':money(h.cost)}</td><td>${money(h.win)}</td><td>×${h.mult}</td></tr>`).join('')+'</table>');
-$('#rules').onclick=()=>modal('<h2>SWEET CASCADE</h2><p>Swap adjacent candies to match 3 or more. You can also move a rocket or bomb. Invalid swaps return without charging credits.</p><p>A line of 4 clears a row or column. A line of 5 or more clears that color. Intersections clear their bounding rectangle. Rockets fire in the arrow direction; bombs clear a 3×3 area.</p><p>Every 3 candies destroyed in a cascade step count as one chain. Demo payout: bet × 0.05 × max(chains × multiplier sum − 1, 0). A single match of 3 with no continuation pays nothing.</p><p>Collect 3 magic candies to trigger the ice bonus. Wins and multipliers accumulate during the bonus. Each destroyed magic candy adds one move.</p><p>Press Space for an automatic move; hold to repeat. The board persists between moves and after reloading.</p><p>This client demo uses test generation, no real money and no declared RTP. Final mathematics and unresolved edge cases require the production RGS.</p>');
+$('#rules').onclick=()=>serverMode?modal('<h2>SWEET CASCADE · RGS TEST</h2><p>Swap adjacent symbols. Press Play or Space to use a move suggested by the server. Cascades, wins and your balance come from the test RGS.</p><p>Bonuses and extra bet modes are not available in this server version. Test payouts are still being developed.</p><p>Reload starts a fresh test session. After a connection failure, the last move is never submitted again automatically.</p>'):modal('<h2>SWEET CASCADE</h2><p>Swap adjacent candies to match 3 or more. You can also move a rocket or bomb. Invalid swaps return without charging credits.</p><p>A line of 4 clears a row or column. A line of 5 or more clears that color. Intersections clear their bounding rectangle. Rockets fire in the arrow direction; bombs clear a 3×3 area.</p><p>Every 3 candies destroyed in a cascade step count as one chain. Demo payout: bet × 0.05 × max(chains × multiplier sum − 1, 0). A single match of 3 with no continuation pays nothing.</p><p>Collect 3 magic candies to trigger the ice bonus. Wins and multipliers accumulate during the bonus. Each destroyed magic candy adds one move.</p><p>Press Space for an automatic move; hold to repeat. The board persists between moves and after reloading.</p><p>This client demo uses test generation, no real money and no declared RTP. Final mathematics and unresolved edge cases require the production RGS.</p>');
 window.addEventListener('keydown',e=>{if(e.code==='Escape'){stop();return;}if(e.code!=='Space'||/INPUT|TEXTAREA|SELECT|BUTTON/.test(e.target.tagName)||$('#dialog').open)return;e.preventDefault();if(e.repeat)return;held=true;if(!busy)play();});window.addEventListener('keyup',e=>{if(e.code==='Space')held=false;});window.addEventListener('blur',()=>{held=false;cancelDrag();});document.addEventListener('visibilitychange',()=>{if(document.hidden){stop();cancelDrag();}});
-app.ticker.add(t=>{let dt=Math.min(t.deltaMS,50);const hoverActive=hoveredCell!==null&&!busy&&!pointer;hoverOpacity+=(Number(hoverActive)-hoverOpacity)*Math.min(1,dt/110);if(hoverActive)Object.assign(hoverCell,pos(hoveredCell));hoverCell.alpha=hoverOpacity*(.17+.045*Math.sin(performance.now()*.0032));for(let i=anims.length-1;i>=0;i--){const a=anims[i];a.t+=dt;let p=Math.min(a.t/a.ms,1),e=a.ease(p);if(!a.obj.destroyed)for(const k in a.to)a.obj[k]=a.from[k]+(a.to[k]-a.from[k])*e;if(p===1){anims.splice(i,1);a.resolve();}}for(let i=particles.length-1;i>=0;i--){const p=particles[i];p.life-=dt/1000;p.g.x+=p.vx*dt/1000;p.g.y+=p.vy*dt/1000;p.vy+=460*dt/1000;p.g.alpha=Math.max(0,p.life/p.total);p.g.rotation+=dt*.003;if(p.life<=0){p.g.destroy();particles.splice(i,1);}}for(const n of nodes.values()){if(n.whiteFilter){const v=n.white.v,k=1-v;n.whiteBlur.strength=.8*v;n.whiteFilter.matrix=[k,0,0,0,v,0,k,0,0,v,0,0,k,0,v,0,0,0,1,0];}if(['candy','bomb','rocket'].includes(n.kind)){const phase=performance.now()*.0019*n.idleRate+n.phase;const amp=1;const emphasis=selected===n.index?1.045:1;n.sprite.y=Math.sin(phase)*2.1*amp;n.sprite.rotation=n.baseSpriteRotation+Math.sin(phase*.79)*.016*amp;n.sprite.scale.set(n.baseSpriteScale*emphasis*(1+Math.sin(phase*1.17)*.016*amp),n.baseSpriteScaleY*emphasis*(1-Math.sin(phase*1.17)*.016*amp));if(n.multiplierLabel){const b=n.multiplierLabel;b.position.copyFrom(n.sprite.position);b.rotation=n.sprite.rotation-n.baseSpriteRotation;b.scale.set(n.sprite.scale.x/n.baseSpriteScale,n.sprite.scale.y/n.baseSpriteScaleY);}}for(const g of n.glows||[]){g.position.copyFrom(n.sprite.position);g.rotation=n.sprite.rotation;g.scale.set(n.sprite.scale.x*g.glowSpread,n.sprite.scale.y*g.glowSpread);}}});
-draw(state.board);hud();persist();window.sweetCascade={rgs,play,get state(){return clone(state);},get busy(){return busy;},app};
+app.ticker.add(t=>{let dt=Math.min(t.deltaMS,50);swipeHint.tick(dt,!busy&&!pointer&&!held&&!auto&&!document.hidden&&!$('#dialog').open&&state.board.length===49&&(!serverMode||rgs.playable),()=>serverMode?rgs.moves():moves(state.board));const hoverActive=hoveredCell!==null&&!busy&&!pointer;hoverOpacity+=(Number(hoverActive)-hoverOpacity)*Math.min(1,dt/110);if(hoverActive)Object.assign(hoverCell,pos(hoveredCell));hoverCell.alpha=hoverOpacity*(.17+.045*Math.sin(performance.now()*.0032));for(let i=anims.length-1;i>=0;i--){const a=anims[i];a.t+=dt;let p=Math.min(a.t/a.ms,1),e=a.ease(p);if(!a.obj.destroyed)for(const k in a.to)a.obj[k]=a.from[k]+(a.to[k]-a.from[k])*e;if(p===1){anims.splice(i,1);a.resolve();}}for(let i=particles.length-1;i>=0;i--){const p=particles[i];p.life-=dt/1000;p.g.x+=p.vx*dt/1000;p.g.y+=p.vy*dt/1000;p.vy+=460*dt/1000;p.g.alpha=Math.max(0,p.life/p.total);p.g.rotation+=dt*.003;if(p.life<=0){p.g.destroy();particles.splice(i,1);}}for(const n of nodes.values()){if(n.whiteFilter){const v=n.white.v,k=1-v;n.whiteBlur.strength=.8*v;n.whiteFilter.matrix=[k,0,0,0,v,0,k,0,0,v,0,0,k,0,v,0,0,0,1,0];}if(['candy','bomb','rocket'].includes(n.kind)){const phase=performance.now()*.0019*n.idleRate+n.phase;const amp=1;const emphasis=selected===n.index?1.045:1;n.sprite.y=Math.sin(phase)*2.1*amp;n.sprite.rotation=n.baseSpriteRotation+Math.sin(phase*.79)*.016*amp;n.sprite.scale.set(n.baseSpriteScale*emphasis*(1+Math.sin(phase*1.17)*.016*amp),n.baseSpriteScaleY*emphasis*(1-Math.sin(phase*1.17)*.016*amp));if(n.multiplierLabel){const b=n.multiplierLabel;b.position.copyFrom(n.sprite.position);b.rotation=n.sprite.rotation-n.baseSpriteRotation;b.scale.set(n.sprite.scale.x/n.baseSpriteScale,n.sprite.scale.y/n.baseSpriteScaleY);}}for(const g of n.glows||[]){g.position.copyFrom(n.sprite.position);g.rotation=n.sprite.rotation;g.scale.set(n.sprite.scale.x*g.glowSpread,n.sprite.scale.y*g.glowSpread);}}});
+
+function showConnectionFault(){
+ if(!serverMode||!rgs.transport.fault)return;stop();cancelDrag();$('#game').inert=true;if($('#dialog').open)close();
+ if(document.hidden)return;
+ const panel=$('#rgs-status');panel.hidden=false;panel.querySelector('h2').textContent='CONNECTION STOPPED';
+ panel.querySelector('p').textContent=rgs.transport.unknownOutcome?'The last move could not be confirmed or displayed. It will not be sent again. Reload starts a new test session.':rgs.transport.fault+' Reload starts a new test session.';
+ panel.querySelector('button').hidden=false;panel.querySelector('button').focus();
+}
+$('#rgs-reload').onclick=()=>location.reload();
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)showConnectionFault();});
+window.addEventListener('pageshow',()=>showConnectionFault());
+draw(state.board);hud();persist();window.sweetCascade={rgs,play,get state(){return clone(state);},get busy(){return busy;},get hint(){return {visible:swipeHint.layer.visible,pair:swipeHint.pair,elapsed:swipeHint.elapsed};},app};
 // Reproducible visual QA is opt-in and never changes the normal game session.
 if(new URLSearchParams(location.search).has('qa')){const qa=document.createElement('button');qa.textContent='VFX TEST';qa.style.cssText='position:fixed;bottom:50px;left:10px;z-index:5;background:#172944;padding:10px;border-radius:8px';document.body.append(qa);qa.onclick=async()=>{if(busy)return;busy=true;try{await effect({kind:'bomb',i:24});burst(24,0xffd65a,40);await pause(500);await effect({kind:'rocket',i:38,dir:0});await pause(500);await shuffleBoard(state.board);}finally{busy=false;}};}
+
+if(serverMode){try{state=await rgs.initialize();draw(state.board);busy=false;swipeHint.reset(1400);hud();$('#rgs-status').hidden=true;$('#game').inert=false;}catch{busy=false;hud();showConnectionFault();}}else{$('#rgs-status').hidden=true;$('#game').inert=false;}
+
 
