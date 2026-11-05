@@ -1,0 +1,18 @@
+REEBOO Labs - Casual & Puzzle Game SFX - License
+
+You may use these sounds, royalty-free, in commercial and non-commercial games, apps and videos,
+in unlimited projects. Credit to REEBOO Labs is appreciated but not required.
+
+You may NOT resell or redistribute the sounds as-is, alone or as part of a sound pack, asset pack,
+library or any other collection. Edited or layered versions may be used inside your own projects,
+but not resold or redistributed as sound assets.
+
+All sounds were synthesized by original code (tuned bell, marimba, plucked-string and sine voices,
+glass and wood resonators, bubble-style pops, cartoon spring tones, filtered-noise swishes, grain clouds
+and synthetic room reverb).
+No recordings or third-party samples are included.
+The included Godot scripts and demo scene may be used and modified freely in your projects.
+
+The sounds are provided as-is, without warranty.
+
+(c) REEBOO Labs. Contact: Alrabia@reeboolabs.com
