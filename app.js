@@ -1,3 +1,115 @@
+const loadingStarted=performance.now();
+const loadingRotation=(Math.random()-.5)*16;
+const loadingPositions=[];
+document.querySelectorAll('.loading-icons i').forEach((icon,index)=>{
+ const hover=document.createElement('span');hover.className='loading-hover';
+ hover.append(icon.querySelector('img'));icon.append(hover);
+ let position={x:0,y:0},bestGap=-1;
+ for(let attempt=0;attempt<64;attempt++){
+  const angle=(-90+index*40+loadingRotation+(Math.random()-.5)*20)*Math.PI/180;
+  const radius=26+Math.random()*14;
+  const candidate={x:Math.max(-37,Math.min(37,Math.cos(angle)*radius)),y:Math.sin(angle)*radius};
+  const gap=Math.min(...loadingPositions.map(p=>Math.hypot(candidate.x-p.x,candidate.y-p.y)));
+  if(gap>bestGap){position=candidate;bestGap=gap;}
+  if(gap>=20)break;
+ }
+ loadingPositions.push(position);
+ for(const [name,value] of Object.entries({
+  '--x':`calc(var(--loader-unit) * ${position.x.toFixed(2)})`,
+  '--y':`calc(var(--loader-unit) * ${position.y.toFixed(2)})`,
+  '--bob':`calc(var(--loader-unit) * ${(2.6+Math.random()*.9).toFixed(2)})`,
+  '--sway':`calc(var(--loader-unit) * ${(.7+Math.random()*.6).toFixed(2)})`,
+  '--turn':`${(-18+Math.random()*36).toFixed(1)}deg`,
+  '--delay':`${(.5+Math.random()*.22).toFixed(2)}s`,
+  '--float':`${(3.1+Math.random()*1).toFixed(2)}s`,
+  '--spin-time':`${(26+Math.random()*14).toFixed(2)}s`,
+  '--spin-direction':Math.random()<.5?'normal':'reverse',
+  '--phase':`${(-Math.random()*4).toFixed(2)}s`,
+ }))icon.style.setProperty(name,value);
+});
+
+const loadingCover=document.getElementById('loading');
+if(loadingCover){
+ const progress=document.createElement('div');progress.className='loading-progress';
+ progress.innerHTML='<div class="loading-progress-track" role="progressbar" aria-label="Loading game" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="loading-progress-fill"></span></div><div class="loading-progress-caption"><span>LOADING</span></div>';
+ loadingCover.append(progress);
+}
+function setLoadingProgress(percent){
+ const cover=document.getElementById('loading'),bar=cover?.querySelector('[role="progressbar"]');if(!bar)return;
+ const value=Math.max(Number(bar.getAttribute('aria-valuenow'))||0,Math.min(100,Math.floor(percent)));
+ bar.setAttribute('aria-valuenow',String(value));bar.style.setProperty('--progress',value+'%');
+}
+const loadingTemplate=document.getElementById('loading')?.cloneNode(true);
+function showSessionLoading(){
+ if(document.getElementById('loading')||!loadingTemplate)return ()=>{};
+ const cover=loadingTemplate.cloneNode(true),game=document.getElementById('game-layout');
+ cover.setAttribute('aria-label','Restoring game session');cover.classList.add('loading-restoring');cover.querySelector('[role="progressbar"]')?.removeAttribute('aria-valuenow');document.body.appendChild(cover);
+ if(game)game.inert=true;
+ return ()=>{cover.remove();if(game)game.inert=false;};
+}
+
+let finishLoadingPromise;
+function finishLoading(ready=()=>true){return finishLoadingPromise??=finishLoadingOnce(ready);}
+async function finishLoadingOnce(ready){
+ const cover=document.getElementById('loading');if(!cover)return;
+ await Promise.all([...cover.querySelectorAll('.loading-icons img')].map(img=>img.decode().catch(()=>{})));
+ await new Promise(resolve=>setTimeout(resolve,Math.max(0,2200-(performance.now()-loadingStarted))));
+ if(!ready())throw Error('Session lost during loader');
+ if(!matchMedia('(prefers-reduced-motion: reduce)').matches){
+  const flights=Array.from(cover.querySelectorAll('.loading-icons i')).map((icon,index)=>{
+   icon.querySelectorAll('.loading-hover,img').forEach(part=>part.style.animationPlayState='paused');
+   // Start at the actual current pose, including when loading finishes during the intro.
+   const pose=getComputedStyle(icon).transform;
+   icon.style.animation='none';icon.style.transform=pose;
+   return icon.animate([{transform:pose},{transform:'translate(0,0) scale(.2) rotate(0deg)'}],{
+    duration:480,delay:(index%3)*20,easing:'cubic-bezier(.55,0,.65,1)',fill:'forwards',
+   }).finished;
+  });
+  await Promise.all(flights);
+  await cover.querySelector('.loading-brand').animate([
+   {transform:'scale(1)',offset:0},
+   {transform:'scale(1.16)',offset:.3},
+   {transform:'scale(.98)',offset:.62},
+   {transform:'scale(1.025)',offset:.82},
+   {transform:'scale(1)',offset:1},
+  ],{duration:540,easing:'ease-in-out',fill:'forwards'}).finished;
+  await cover.animate([{opacity:1},{opacity:0}],{duration:180,fill:'forwards'}).finished;
+ }
+ if(!ready())throw Error('Session lost during loader');
+ cover.remove();
+}
+
+function showLoadingError(message){
+ const cover=document.getElementById('loading');if(cover){cover.getAnimations().forEach(a=>a.cancel());cover.style.opacity='1';}
+ const text=document.getElementById('loadingText');if(!text)return;
+ text.hidden=false;text.textContent=message||'Unable to load the game.';
+ const button=document.createElement('button');button.className='loading-reload';button.textContent='Reload';
+ button.addEventListener('click',()=>location.reload());text.append(document.createElement('br'),button);
+}
+
+// Percent of declared readiness tasks, not a fabricated byte-download estimate.
+function createLoadingProgress(taskIds,render){
+ const expected=new Set(taskIds),done=new Set();
+ render(0);
+ return id=>{if(!expected.has(id)||done.has(id))return;done.add(id);render(Math.floor(done.size/expected.size*100));};
+}
+
+const preparationDone=createLoadingProgress(['scene','font','audio','renderer','boosters','ice','candies','pink','session','frame'],setLoadingProgress);
+let startupFailure=false;
+async function prepareTask(id,work){
+ let timer;
+ try{const result=await Promise.race([Promise.resolve().then(work),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Preparation timed out: '+id)),45000);})]);if(!startupFailure)preparationDone(id);return result;}
+ catch(error){failStartup('Unable to prepare '+id+'. Please reload.');throw error;}
+ finally{clearTimeout(timer);}
+}
+function failStartup(message){if(startupFailure)return;startupFailure=true;document.querySelector('#game').inert=true;showLoadingError(message);}
+async function revealGame(ready){
+ if(startupFailure||!ready())throw Error('Game session is not ready.');
+ await finishLoading(()=>!startupFailure&&ready());
+ if(startupFailure||!ready())throw Error('Connection lost during loading.');
+ document.querySelector('#game').inert=false;
+}
+
 const N=7;
 const clone=x=>structuredClone(x);
 const adjacent=(a,b)=>Math.abs(a%7-b%7)+Math.abs(Math.floor(a/7)-Math.floor(b/7))===1;
@@ -74,22 +186,93 @@ class DemoRGS{
  }
 }
 
+/* Decode once per file, with bounded concurrency and an alternate codec. */
+class GameAudioLoader {
+ constructor(context,{fetchFile=(...args)=>fetch(...args),timeout=18000,concurrency=3,formats=['wav','mp3'],urlFor=(file,format)=>`assets/audio/${encodeURIComponent(file)}.${format}`,onFailure=()=>{}}={}){
+  if(!Number.isInteger(concurrency)||concurrency<1||!Number.isFinite(timeout)||timeout<=0||!formats.length)throw Error('Invalid audio loader settings');
+  this.concurrency=concurrency;this.formats=[...formats];this.urlFor=urlFor;
+  this.context=context;this.fetchFile=fetchFile;this.timeout=timeout;this.onFailure=onFailure;
+  this.cache=new Map();this.queue=[];this.running=0;this.failures=[];this.recoveries=[];
+ }
+ load(file){
+  if(!this.cache.has(file))this.cache.set(file,this.decode(file));
+  return this.cache.get(file);
+ }
+ pump(){
+  while(this.running<this.concurrency&&this.queue.length){const job=this.queue.shift();
+   if(job.signal.aborted){job.reject(Error('Audio preparation timed out'));continue;}
+   this.running++;
+   // Timed-out decodes still occupy a slot until the browser actually finishes.
+   Promise.resolve().then(()=>this.context.decodeAudioData(job.bytes)).then(job.resolve,()=>job.reject(Error('Browser could not decode audio'))).finally(()=>{this.running--;this.pump();});
+  }
+ }
+ async attempt(file,format){
+  const controller=new AbortController();let timer;
+  try{return await Promise.race([
+   (async()=>{
+    const response=await this.fetchFile(this.urlFor(file,format),{signal:controller.signal,cache:format==='mp3'?'reload':'default'});
+    if(!response.ok)throw Error('HTTP '+response.status);
+    const type=response.headers?.get('content-type')||'';
+    if(/text\/html|application\/json/i.test(type))throw Error('Server returned '+(/html/i.test(type)?'HTML':'JSON')+' instead of audio');
+    const bytes=await response.arrayBuffer();if(bytes.byteLength<32)throw Error('Empty audio');
+    const decoded=await new Promise((resolve,reject)=>{this.queue.push({bytes,signal:controller.signal,resolve,reject});this.pump();});
+    if(!decoded||!Number.isFinite(decoded.duration)||decoded.duration<=0)throw Error('Empty decoded audio');
+    return decoded;
+   })(),
+   new Promise((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(Error('Audio preparation timed out'));},this.timeout);})
+  ]);}finally{clearTimeout(timer);}
+ }
+ async decode(file){
+  const attempts=[];
+  for(const format of this.formats){
+   try{const buffer=await this.attempt(file,format);if(attempts.length)this.recoveries.push({file,attempts});return buffer;}catch(error){
+    const message=String(error?.message??error);
+    const safe=/^(HTTP \d{3}|Empty audio|Empty decoded audio|Browser could not decode audio|Server returned (HTML|JSON) instead of audio|Audio preparation timed out)$/.test(message)?message:'Audio download failed';
+    attempts.push({format,error:safe});
+   }
+  }
+  const failure={file,attempts};this.failures.push(failure);
+  console.warn('Audio unavailable:',file,attempts);
+  try{this.onFailure(failure);}catch{}
+  return null;
+ }
+}
+
+const AUDIO_FILES={"swap": {"wav": "public/audio/runtime/swap.wav", "mp3": "public/audio/runtime/swap.mp3"}, "pop": {"wav": "public/audio/runtime/pop.wav", "mp3": "public/audio/runtime/pop.mp3"}, "pop1": {"wav": "public/audio/runtime/pop1.wav", "mp3": "public/audio/runtime/pop1.mp3"}, "pop2": {"wav": "public/audio/runtime/pop2.wav", "mp3": "public/audio/runtime/pop2.mp3"}, "pop3": {"wav": "public/audio/runtime/pop3.wav", "mp3": "public/audio/runtime/pop3.mp3"}, "pop4": {"wav": "public/audio/runtime/pop4.wav", "mp3": "public/audio/runtime/pop4.mp3"}, "pop5": {"wav": "public/audio/runtime/pop5.wav", "mp3": "public/audio/runtime/pop5.mp3"}, "land": {"wav": "public/audio/runtime/land.wav", "mp3": "public/audio/runtime/land.mp3"}, "magic": {"wav": "public/audio/runtime/magic.wav", "mp3": "public/audio/runtime/magic.mp3"}, "multiplier": {"wav": "public/audio/runtime/multiplier.wav", "mp3": "public/audio/runtime/multiplier.mp3"}, "iceHit": {"wav": "public/audio/runtime/iceHit.wav", "mp3": "public/audio/runtime/iceHit.mp3"}, "ice": {"wav": "public/audio/runtime/ice.wav", "mp3": "public/audio/runtime/ice.mp3"}, "bonus": {"wav": "public/audio/runtime/bonus.wav", "mp3": "public/audio/runtime/bonus.mp3"}, "transition": {"wav": "public/audio/runtime/transition.wav", "mp3": "public/audio/runtime/transition.mp3"}, "win": {"wav": "public/audio/runtime/win.wav", "mp3": "public/audio/runtime/win.mp3"}, "winMega": {"wav": "public/audio/runtime/winMega.wav", "mp3": "public/audio/runtime/winMega.mp3"}, "winEpic": {"wav": "public/audio/runtime/winEpic.wav", "mp3": "public/audio/runtime/winEpic.mp3"}, "winEnd": {"wav": "public/audio/runtime/winEnd.wav", "mp3": "public/audio/runtime/winEnd.mp3"}, "music": {"wav": "public/audio/runtime/music.wav", "mp3": "public/audio/runtime/music.mp3"}};
+
+class MusicLoop {
+ constructor(context,buffer,gain){Object.assign(this,{context,buffer,gain});this.source=null;this.offset=0;this.generation=0;this.wanted=false;}
+ async setPlaying(wanted){
+  this.wanted=!!wanted;const generation=++this.generation;
+  if(!wanted){this.pause();return;}
+  if(!this.buffer||this.source)return;
+  try{await this.context.resume();}catch{return;}
+  if(generation!==this.generation||!this.wanted||this.source||this.context.state!=='running')return;
+  const source=this.context.createBufferSource();source.buffer=this.buffer;source.loop=true;source.connect(this.gain);
+  this.source=source;this.started=this.context.currentTime;source.start(0,this.offset%this.buffer.duration);
+  source.onended=()=>{if(this.source===source)this.source=null;source.disconnect();};
+ }
+ pause(){const source=this.source;if(!source)return;this.offset=(this.offset+this.context.currentTime-this.started)%this.buffer.duration;this.source=null;try{source.stop();}catch{}source.disconnect();}
+}
+
 // User-recorded reference samples with procedural fallbacks for unisolated events.
 class Sound{
  get enabled(){return this._enabled;}
  set enabled(value){this._enabled=!!value;if(!value){this.cancelCelebration();for(const source of this.voices||[])try{source.stop();}catch{}}this.syncMusic();}
  get music(){return this._music;}
  set music(value){this._music=!!value;this.syncMusic();}
- syncMusic(){if(!this.musicAudio)return;if(this.music&&this.enabled&&!document.hidden){if(this.musicAudio.paused&&!this.musicPending){this.musicPending=true;this.musicAudio.play().catch(()=>{}).finally(()=>{this.musicPending=false;});}}else this.musicAudio.pause();}
- constructor(){this.enabled=true;this.music=true;this.ctx=null;this.beat=0;this.timer=null;this.cascade=0;this.lastLand=-1;this.popVariant=-1;}
- async loadSamples(){this.samples={};try{const encoded=await (await fetch('public/audio/reference-samples.json')).json();const decoder=new OfflineAudioContext(1,1,44100);await Promise.all(Object.entries(encoded).map(async([name,value])=>{const raw=Uint8Array.from(atob(value),c=>c.charCodeAt(0));this.samples[name]=await decoder.decodeAudioData(raw.buffer);}));}catch(e){console.warn('Reference audio unavailable; using procedural fallback',e);}}
- sample(name,step=0){if(!this.ctx||!this.enabled)return false;const level=Math.min(5,Math.max(0,Math.floor(step))),key=name==='pop'&&level>0?'pop'+level:name;const buffer=this.samples?.[key];if(!buffer)return false;const now=this.ctx.currentTime;this.lastSample??={};const gap={land:.16,magic:.25,ice:.12,iceHit:.16,multiplier:.18}[name]??0;if(now-(this.lastSample[name]??-100)<gap)return true;this.lastSample[name]=now;const src=this.ctx.createBufferSource(),gain=this.ctx.createGain();src.buffer=buffer;src.cue=key;if(name==='pop'){if(level===0)this.popVariant=(this.popVariant+1)%3;src.playbackRate.value=2**(Math.max(0,this.popVariant)*.5/12);}gain.gain.value=({swap:2.5,pop:1.7,land:2,magic:.9,multiplier:1.2,iceHit:.65,ice:.85,bonus:1.2,transition:1.1,win:1.1,winMega:1.1,winEpic:1.1,winEnd:1.1}[name]??1);src.connect(gain).connect(this.bus);this.voices??=new Set();this.voices.add(src);src.start();src.onended=()=>{this.voices.delete(src);src.disconnect();gain.disconnect();};return true;}
+ syncMusic(){this.musicLoop?.setPlaying(this.music&&this.enabled&&this.unlocked&&!document.hidden);}
+ constructor(){this.enabled=true;this.music=true;this.ctx=null;this.beat=0;this.timer=null;this.cascade=0;this.lastLand=-1;this.popVariant=-1;this.unlocked=false;document.addEventListener('visibilitychange',()=>{if(document.hidden){this.cancelCelebration();for(const v of this.voices||[])try{v.stop();}catch{}this.ctx?.suspend().catch(()=>{});}else if(this.unlocked)this.ctx?.resume().catch(()=>{});this.syncMusic();});}
+ prepareContext(){if(this.ctx)return;this.ctx=new AudioContext();this.bus=this.ctx.createGain();this.bus.gain.value=.35;this.limiter=this.ctx.createDynamicsCompressor();this.limiter.threshold.value=-14;this.limiter.knee.value=12;this.limiter.ratio.value=5;this.limiter.attack.value=.003;this.limiter.release.value=.12;this.bus.connect(this.limiter).connect(this.ctx.destination);this.musicGain=this.ctx.createGain();this.musicGain.gain.value=.15;this.musicGain.connect(this.ctx.destination);}
+ loadSamples(){return this.loading??=this.prepareSamples();}
+ async prepareSamples(){this.samples={};this.unavailable=[];try{this.prepareContext();const loader=this.audioLoader=new GameAudioLoader(this.ctx,{urlFor:(name,format)=>AUDIO_FILES[name][format],timeout:16000,concurrency:3});await Promise.all(Object.keys(AUDIO_FILES).map(async name=>{const buffer=await loader.load(name);if(buffer)this.samples[name]=buffer;else this.unavailable.push(name);}));this.musicLoop=new MusicLoop(this.ctx,this.samples.music,this.musicGain);this.syncMusic();}catch{this.unavailable=Object.keys(AUDIO_FILES);}return {unavailable:this.unavailable};}
+ sample(name,step=0){if(!this.ctx||!this.enabled||document.hidden)return false;const level=Math.min(5,Math.max(0,Math.floor(step))),key=name==='pop'&&level>0?'pop'+level:name;const buffer=this.samples?.[key];if(!buffer)return false;const now=this.ctx.currentTime;this.lastSample??={};const gap={land:.16,magic:.25,ice:.12,iceHit:.16,multiplier:.18}[name]??0;if(now-(this.lastSample[name]??-100)<gap)return true;this.lastSample[name]=now;const src=this.ctx.createBufferSource(),gain=this.ctx.createGain();src.buffer=buffer;src.cue=key;if(name==='pop'){if(level===0)this.popVariant=(this.popVariant+1)%3;src.playbackRate.value=2**(Math.max(0,this.popVariant)*.5/12);}gain.gain.value=({swap:2.5,pop:1.7,land:2,magic:.9,multiplier:1.2,iceHit:.65,ice:.85,bonus:1.2,transition:1.1,win:1.1,winMega:1.1,winEpic:1.1,winEnd:1.1}[name]??1);src.connect(gain).connect(this.bus);this.voices??=new Set();this.voices.add(src);src.start();src.onended=()=>{this.voices.delete(src);src.disconnect();gain.disconnect();};return true;}
  cancelCelebration(){this.celebrationToken=(this.celebrationToken||0)+1;for(const src of this.voices||[])if(['win','winMega','winEpic'].includes(src.cue))try{src.stop();}catch{}}
  async celebrate(ratio=0){this.cancelCelebration();const token=this.celebrationToken;const cues=['win'];if(ratio>=25)cues.push('winMega');if(ratio>=50)cues.push('winEpic');for(const cue of cues){if(token!==this.celebrationToken||!this.enabled)return;this.play(cue);await new Promise(resolve=>setTimeout(resolve,(this.samples?.[cue]?.duration??.5)*1000));}}
- unlock(){if(!this.ctx){this.ctx=new AudioContext();this.bus=this.ctx.createGain();this.bus.gain.value=.35;this.limiter=this.ctx.createDynamicsCompressor();this.limiter.threshold.value=-14;this.limiter.knee.value=12;this.limiter.ratio.value=5;this.limiter.attack.value=.003;this.limiter.release.value=.12;this.bus.connect(this.limiter).connect(this.ctx.destination);}this.ctx.resume();if(!this.musicAudio){this.musicAudio=new Audio('public/audio/background-music.mp3');this.musicAudio.loop=true;this.musicAudio.volume=.15;document.addEventListener('visibilitychange',()=>this.syncMusic());}this.syncMusic();if(!this.timer)this.timer=setInterval(()=>this.tick(),320);}
- tone(freq,duration=.12,type='sine',gain=.15,delay=0,end=null){if(!this.ctx||!this.enabled)return;const t=this.ctx.currentTime+delay,o=this.ctx.createOscillator(),g=this.ctx.createGain();o.type=type;o.frequency.setValueAtTime(freq,t);if(end)o.frequency.exponentialRampToValueAtTime(end,t+duration);g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(gain,t+.009);g.gain.exponentialRampToValueAtTime(.0001,t+duration);o.connect(g).connect(this.bus);o.start(t);o.stop(t+duration+.02);}
- noise(duration=.2,gain=.12,high=1500){if(!this.ctx||!this.enabled)return;let n=this.ctx.sampleRate*duration,buf=this.ctx.createBuffer(1,n,this.ctx.sampleRate),a=buf.getChannelData(0);for(let i=0;i<n;i++)a[i]=(Math.random()*2-1)*Math.pow(1-i/n,3);let src=this.ctx.createBufferSource(),f=this.ctx.createBiquadFilter(),g=this.ctx.createGain();src.buffer=buf;f.type='lowpass';f.frequency.value=high;g.gain.value=gain;src.connect(f).connect(g).connect(this.bus);src.start();}
- play(name,step=0){if(this.sample(name,step))return;if(name==='iceHit')name='ice';if(name==='transition'||name==='winEnd')name='magic';if(name==='multiplier')name='click';if(name==='shuffle')name='magic';if(name==='swap'){this.tone(450,.09,'sine',.2,0,900);}if(name==='invalid'){this.tone(220,.13,'triangle',.12,0,130);}if(name==='pop'){const semitones=[0,2,4,7,9,12,14,16,19,21,24];const pitch=2**(semitones[Math.min(semitones.length-1,Math.max(0,step))]/12),f=480*pitch;this.tone(f*1.55,.095,'sine',.31,0,f*.52);this.tone(f*.65,.14,'sine',.13,.018,f*.32);this.noise(.035,.045,2600);this.tone(660*pitch,.23,'sine',.085,.025);this.tone(990*pitch,.15,'sine',.033,.045);if(step>1)this.tone(1320*pitch,.19,'sine',.025,.075);}if(name==='land'&&this.ctx){const now=this.ctx.currentTime;if(now-this.lastLand<.025)return;this.lastLand=now;const pitch=2**(Math.min(step,10)*1.2/12)*(1+(Math.random()-.5)*.1);this.tone(310*pitch,.075,'sine',.15,0,145*pitch);this.tone(155*pitch,.105,'sine',.095,.025,225*pitch);this.tone(730*pitch,.045,'sine',.025,.008,450*pitch);this.noise(.022,.023,1200);}if(name==='ice'){this.noise(.24,.22,7000);this.tone(1900,.25,'sine',.06);}if(name==='bomb'){this.noise(.4,.5,800);this.tone(160,.35,'sine',.5,0,35);}if(name==='rocket'){this.noise(.3,.3,4000);this.tone(250,.25,'triangle',.1,0,1800);}if(name==='magic'||name==='win'||name==='bonus'){[0,4,7,12,16].forEach((n,i)=>this.tone(523.25*2**(n/12),.4,'sine',.12,i*.085));}if(name==='click')this.tone(700,.045,'sine',.1,0,400);}
+ unlock(){this.unlocked=true;try{this.prepareContext();this.ctx.resume().catch(()=>{});this.syncMusic();}catch{}}
+ tone(freq,duration=.12,type='sine',gain=.15,delay=0,end=null){if(!this.ctx||!this.enabled||document.hidden)return;const t=this.ctx.currentTime+delay,o=this.ctx.createOscillator(),g=this.ctx.createGain();o.type=type;o.frequency.setValueAtTime(freq,t);if(end)o.frequency.exponentialRampToValueAtTime(end,t+duration);g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(gain,t+.009);g.gain.exponentialRampToValueAtTime(.0001,t+duration);o.connect(g).connect(this.bus);o.start(t);o.stop(t+duration+.02);}
+ noise(duration=.2,gain=.12,high=1500){if(!this.ctx||!this.enabled||document.hidden)return;let n=this.ctx.sampleRate*duration,buf=this.ctx.createBuffer(1,n,this.ctx.sampleRate),a=buf.getChannelData(0);for(let i=0;i<n;i++)a[i]=(Math.random()*2-1)*Math.pow(1-i/n,3);let src=this.ctx.createBufferSource(),f=this.ctx.createBiquadFilter(),g=this.ctx.createGain();src.buffer=buf;f.type='lowpass';f.frequency.value=high;g.gain.value=gain;src.connect(f).connect(g).connect(this.bus);src.start();}
+ play(name,step=0){if(this.unavailable?.includes(name))return;if(this.sample(name,step))return;if(name==='iceHit')name='ice';if(name==='transition'||name==='winEnd')name='magic';if(name==='multiplier')name='click';if(name==='shuffle')name='magic';if(name==='swap'){this.tone(450,.09,'sine',.2,0,900);}if(name==='invalid'){this.tone(220,.13,'triangle',.12,0,130);}if(name==='pop'){const semitones=[0,2,4,7,9,12,14,16,19,21,24];const pitch=2**(semitones[Math.min(semitones.length-1,Math.max(0,step))]/12),f=480*pitch;this.tone(f*1.55,.095,'sine',.31,0,f*.52);this.tone(f*.65,.14,'sine',.13,.018,f*.32);this.noise(.035,.045,2600);this.tone(660*pitch,.23,'sine',.085,.025);this.tone(990*pitch,.15,'sine',.033,.045);if(step>1)this.tone(1320*pitch,.19,'sine',.025,.075);}if(name==='land'&&this.ctx){const now=this.ctx.currentTime;if(now-this.lastLand<.025)return;this.lastLand=now;const pitch=2**(Math.min(step,10)*1.2/12)*(1+(Math.random()-.5)*.1);this.tone(310*pitch,.075,'sine',.15,0,145*pitch);this.tone(155*pitch,.105,'sine',.095,.025,225*pitch);this.tone(730*pitch,.045,'sine',.025,.008,450*pitch);this.noise(.022,.023,1200);}if(name==='ice'){this.noise(.24,.22,7000);this.tone(1900,.25,'sine',.06);}if(name==='bomb'){this.noise(.4,.5,800);this.tone(160,.35,'sine',.5,0,35);}if(name==='rocket'){this.noise(.3,.3,4000);this.tone(250,.25,'triangle',.1,0,1800);}if(name==='magic'||name==='win'||name==='bonus'){[0,4,7,12,16].forEach((n,i)=>this.tone(523.25*2**(n/12),.4,'sine',.12,i*.085));}if(name==='click')this.tone(700,.045,'sine',.1,0,400);}
  tick(){this.syncMusic();}
 }
 
@@ -228,10 +411,41 @@ async function mountKingdom(element) {
   return ()=>{cancelAnimationFrame(frame);observer.disconnect();document.removeEventListener('visibilitychange',resume);reduced.removeEventListener('change',resume);canvas.remove();};
 }
 
+function rgsNumber(value,field,{integer=false,min=0}={}){
+ if(typeof value==='string'&&/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(value.trim()))value=Number(value.trim());
+ if(typeof value!=='number'||!Number.isFinite(value)||value<min||(integer&&!Number.isSafeInteger(value)))throw Error('Invalid '+field+'.');return value;
+}
+function readFreeRounds(raw,stake,previous=null,decimals=2){
+ if(raw==null)return null;
+ const counter=rgsNumber(raw.counter,'free rounds counter',{integer:true}),quantity=rgsNumber(raw.quantity,'free rounds quantity',{integer:true,min:1});
+ if(previous&&(quantity!==previous.quantity||counter<previous.counter))throw Error('Free rounds progress is inconsistent.');
+ const retained=stake==null&&previous&&quantity===previous.quantity&&counter>=previous.counter;
+ const bet=retained?previous.bet:rgsNumber(stake,'free rounds stake',{min:Number.MIN_VALUE});
+ let knownWin=previous?previous.knownWin:0,completeTotal=previous?previous.completeTotal:counter===0;
+ // Startup total already includes all settled rounds before restore. Read it
+ // once, then accumulate only newly accepted round results.
+ if(!previous&&Object.hasOwn(raw,'total_win')){
+  try{const amount=rgsNumber(raw.total_win,'free rounds restored total'),factor=10**decimals;
+   if(!Number.isInteger(decimals)||decimals<0||decimals>8||!Number.isSafeInteger(Math.round(amount*factor)))throw Error('Invalid restored total precision.');
+   knownWin=amount;completeTotal=true;
+  }catch{knownWin=null;completeTotal=false;}
+ }
+ return {counter,quantity,remaining:Math.max(0,quantity-counter),bet,knownWin,completeTotal,retainedStake:!!retained};
+}
+function settleFreeRounds(previous,raw,stake,win,decimals=2){
+ if(!previous&&!raw)return {active:null,completed:null};
+ const award=raw?readFreeRounds(raw,stake,previous):{...previous,counter:previous.quantity,remaining:0};
+ const precision=Number.isInteger(decimals)&&decimals>=0&&decimals<=8?decimals:2,factor=10**precision;
+ const sum=Math.round(award.knownWin*factor)+Math.round(win*factor);
+ award.knownWin=award.knownWin!==null&&Number.isSafeInteger(sum)?sum/factor:null;
+ if(raw?.win!==undefined){try{const amount=rgsNumber(raw.win,'free rounds total');award.knownWin=Number.isSafeInteger(Math.round(amount*factor))?amount:null;award.completeTotal=award.knownWin!==null;}catch{award.knownWin=null;award.completeTotal=false;}}
+ return award.remaining?{active:award,completed:null}:{active:null,completed:award};
+}
+
 // One outstanding request. Never reconnect or replay a mutation automatically.
 class RgsTransport {
  constructor({url,WebSocketImpl=globalThis.WebSocket,document:doc=globalThis.document,window:win=globalThis.window,timeout=15000,onFault=()=>{}}){
-  Object.assign(this,{url,WebSocketImpl,doc,win,timeout,onFault});this.pending=null;this.fault=null;this.unknownOutcome=false;
+  Object.assign(this,{url,WebSocketImpl,doc,win,timeout,onFault});this.pending=null;this.fault=null;this.unknownOutcome=false;this.logged=new Set();
   this.visibility=()=>{this.arm();};this.offline=()=>this.fail('Connection lost.');
   doc?.addEventListener('visibilitychange',this.visibility);win?.addEventListener('pageshow',this.visibility);win?.addEventListener('offline',this.offline);
  }
@@ -262,14 +476,21 @@ class RgsTransport {
   if(this.fault)return;
   const p=this.pending;if(!p)return; // A duplicate cannot resolve another request without its echoed fields.
   let reply;try{reply=JSON.parse(data);}catch{this.fail('Invalid server response.');return;}
+  if(reply.on?.set==='game_log')return;
   const equal=(a,b)=>a===b||(a&&b&&typeof a==='object'&&typeof b==='object'&&Object.keys(a).length===Object.keys(b).length&&Object.keys(a).every(k=>equal(a[k],b[k])));
   if(!equal(reply.on,p.payload)){this.fail('Server response does not match the pending request.');return;}
   clearTimeout(p.timer);this.pending=null;
   if(reply.error!==undefined&&reply.error!==false&&reply.error!==0){p.reject(Error('RGS rejected the request ('+String(reply.error)+').'));this.fail('RGS rejected the request.');return;}
   p.resolve(reply);
  }
+ log(category,message){
+  if(!this.healthy||this.logged.has(category)||this.logged.size>=20)return;
+  this.logged.add(category);try{this.ws.send(JSON.stringify({set:'game_log',message:String(message).slice(0,240)}));}catch{}
+ }
  fail(message){
-  if(this.fault)return;this.fault=message;
+  if(this.fault)return;
+  const safeReasons={'Server response timed out.':'Foreground request timed out.','Connection lost.':'WebSocket error or network offline; cause unavailable.','Connection closed.':'WebSocket closed.','Server response does not match the pending request.':'Reply did not match the pending request.'};
+  this.log('session-fault',(safeReasons[message]||'Game data validation failed.')+' Pending='+String(this.pending?.payload.set||'none')+'. Play blocked; no request repeated.');this.fault=message;
   clearTimeout(this.openTimer);this.opening?.reject(Error(message));this.opening=null;
   if(this.pending){const p=this.pending;this.unknownOutcome||=p.mutation;clearTimeout(p.timer);this.pending=null;p.reject(Error(message));}
   if(this.ws&&this.ws.readyState<2)this.ws.close();this.onFault(message,this.unknownOutcome);
@@ -296,20 +517,59 @@ class RgsBoardAdapter {
  constructor(){this.nextId=0;}
  piece(raw,old){
   if(!raw)return null;const type=raw.id;
-  // Ice/reset mechanics have not been implemented by csw1 yet. Never invent their outcome.
-  if(type>17)throw Error('This server mechanic is not supported by the test client yet (symbol '+type+').');
+  if(type===18)throw Error('Server shuffle is not supported by the test client yet.');
   const c={id:old?.id??++this.nextId,serverId:type,activated:raw.activated??0};
+  if(raw.multiplier!==undefined){if(!Number.isFinite(raw.multiplier)||raw.multiplier<0)throw Error('Invalid symbol multiplier.');c.mult=raw.multiplier;}
   if(type<=12)Object.assign(c,{kind:'candy',color:(type-1)%6,magic:type>6});
-  else if(type<=16)Object.assign(c,{kind:'rocket',dir:type-13,color:0});else Object.assign(c,{kind:'bomb',color:1});
+  else if(type<=16)Object.assign(c,{kind:'rocket',dir:type-13,color:0});
+  else if(type===19){
+   if(!Number.isInteger(raw.health)||raw.health<1)throw Error('Ice destruction requires a verified server collection event.');
+   Object.assign(c,{kind:'ice',hp:raw.health,maxHp:Math.max(old?.maxHp??2,raw.health),color:0});
+  }else Object.assign(c,{kind:'bomb',color:1});
   return c;
  }
  initial(reels){const board=rgsMatrix(reels).map(c=>this.piece(c));if(board.some(c=>!c))throw Error('Incomplete initial board.');return board;}
- replay(previous,bet,requested){
+ replay(previous,bet,requested,{mult=1,meter=0}={}){
   if(!bet||!Array.isArray(bet.events))throw Error('Missing server result.');
   const start=rgsMatrix(bet.reels);if(start.some((c,i)=>c?.id!==previous[i]?.serverId))throw Error('Server board differs from the displayed board.');
-  let board=structuredClone(previous),events=[],step=0,win=0,accepted=false,phase='ready',fired=new Map();
+  if(start.some((c,i)=>c?.id===19&&c.health!==previous[i]?.hp))throw Error('Server ice health changed between moves without a damage event.');
+  let board=start.map((c,i)=>this.piece(c,previous[i])),events=[],step=0,win=0,accepted=false,phase='ready',fired=new Map(),damage=new Map(),magicCells=[],collected=[];
+  if(JSON.stringify(board)!==JSON.stringify(previous))events.push({type:'properties',board:structuredClone(board)});
+  const properties=mask=>{
+   let changed=false;
+   mask.forEach((c,i)=>{if(!c||c.multiplier===undefined)return;if(c.id!==board[i]?.serverId)throw Error('Multiplier refers to a different symbol.');
+    if(c.id===19)throw Error('Ice multiplier collection is not verified yet.');
+    const next=this.piece({...c,activated:c.activated??board[i].activated},board[i]);
+    if(next.mult!==board[i].mult){board[i]=next;changed=true;}
+   });
+   if(changed)events.push({type:'properties',board:structuredClone(board)});
+  };
   for(const e of bet.events){
    if(e.type==='helper')continue;
+   if(e.type==='symbol_counter'){
+    if(!accepted||phase!=='ready'||!Number.isInteger(e.count)||e.count<0||e.count>3)throw Error('Invalid magic progress event.');
+    const mask=rgsMatrix(e.reels),indices=mask.flatMap((c,i)=>c?[i]:[]);
+    if(!indices.length||indices.some(i=>mask[i].id<7||mask[i].id>12||mask[i].id!==board[i]?.serverId))throw Error('Magic collection does not match the board.');
+    meter=e.count;magicCells.push(...indices);continue;
+   }
+   if(e.type==='round_multiplier'){
+    if(!accepted||phase!=='ready')throw Error('Unexpected multiplier event.');
+    if(e.reels){const mask=rgsMatrix(e.reels);properties(mask);mask.forEach((c,i)=>{if(c){if(!(c.multiplier>0))throw Error('Invalid collected multiplier.');collected.push(i);}});}
+    if(e.accumulated!==undefined){if(!Number.isFinite(e.accumulated)||e.accumulated<0)throw Error('Invalid accumulated multiplier.');mult=e.accumulated||1;events.push({type:'progress',mult,meter,board:structuredClone(board)});}
+    // csw1 also emits zero-count markers between collection and the final
+    // accumulated value. They do not change the displayed multiplier.
+    if(!e.reels&&e.accumulated===undefined&&e.count!==0)throw Error('Empty multiplier event.');continue;
+   }
+   if(e.type==='ice'){
+    if(!accepted||phase!=='ready')throw Error('Unexpected ice damage event.');
+    rgsMatrix(e.reels).forEach((c,i)=>{if(!c)return;const old=board[i];if(c.id!==19||old?.kind!=='ice')throw Error('Ice damage does not match the board.');
+     // Updated csw1 omits health in the final hit. Confirm removal against
+     // the subsequent clean snapshot; do not turn this marker into a piece.
+     const next=c.health===undefined?{...old,hp:0}:this.piece(c,old),hp=damage.get(i)?.hp??old.hp;
+     if(c.multiplier!==old.mult)throw Error('Invalid ice damage multiplier.');
+     if(next.hp>=hp||next.mult!==old.mult)throw Error('Invalid ice damage state.');damage.set(i,next);
+    });continue;
+   }
    if(e.type==='bet'){
     if(accepted||phase!=='ready')throw Error('Unexpected swap sequence.');
     const mask=rgsMatrix(e.reels),pair=mask.flatMap((c,i)=>c?[i]:[]);
@@ -321,6 +581,7 @@ class RgsBoardAdapter {
    if(['regular','arrow','bomb'].includes(e.type)){
     if(!accepted||phase!=='ready')throw Error('Unexpected match sequence.');
     const mask=rgsMatrix(e.reels);
+    properties(mask);
     if(e.type==='arrow'||e.type==='bomb')mask.forEach((c,i)=>{
      if(c?.activated===1&&((e.type==='arrow'&&c.id>=13&&c.id<=16)||(e.type==='bomb'&&c.id===17)))fired.set(i,{kind:e.type==='arrow'?'rocket':'bomb',i,dir:c.id-13});
     });
@@ -328,18 +589,29 @@ class RgsBoardAdapter {
    }
    if(e.type==='tumble'&&e.action==='clean'){
     if(!accepted||phase!=='ready')throw Error('Unexpected clean sequence.');
-    const clean=rgsMatrix(e.reels),cells=[],effects=[...fired.values()];fired.clear();
-    clean.forEach((c,i)=>{if(!c&&board[i]){cells.push(i);}else if(c&&!board[i])throw Error('Clean created a new symbol.');});
+    const clean=rgsMatrix(e.reels),cells=[],ice=[],effects=[...fired.values()];fired.clear();
+    clean.forEach((c,i)=>{
+     if(board[i]?.kind==='ice'){
+      if(!c){if(damage.get(i)?.hp!==0)throw Error('Ice removed without a destruction event.');ice.push(i);return;}
+      if(c.id!==19||c.health!==(damage.get(i)?.hp??board[i].hp)||c.multiplier!==board[i].mult)throw Error('Server ice health conflict: damage event and clean snapshot disagree.');
+     }
+     if(!c&&board[i])cells.push(i);else if(c&&!board[i])throw Error('Clean created a new symbol.');else if(c&&c.id!==board[i]?.serverId)throw Error('Clean replaced a surviving symbol.');
+    });
+    if([...magicCells,...collected].some(i=>!cells.includes(i)))throw Error('Collected symbol was not destroyed.');
     board=clean.map((c,i)=>this.piece(c,board[i]));
-    events.push({type:'destroy',cells,ice:[],damage:[],armed:[],effects,step:step++,win:Math.round(win*100)/100,mult:1,board:structuredClone(board)});phase='clean';continue;
+    events.push({type:'destroy',cells,ice,damage:[...damage.keys()],magicCells:[...new Set(magicCells)],collected:[...new Set(collected)],meter,armed:[],effects,step:step++,win:Math.round(win*100)/100,mult,board:structuredClone(board)});damage.clear();magicCells=[];collected=[];phase='clean';continue;
    }
    if(e.type==='tumble'&&e.action==='fall'){
     if(phase!=='clean')throw Error('Unexpected fall sequence.');
     const raw=rgsMatrix(e.reels),next=Array(49).fill(null);
     for(let x=0;x<7;x++){
-     const survivors=board.filter((c,i)=>i%7===x&&c);let k=0;
-     for(let y=0;y<7;y++){const i=y*7+x;if(raw[i]){const old=survivors[k++];if(!old||old.serverId!==raw[i].id)throw Error('Gravity differs from server board.');next[i]=this.piece(raw[i],old);}}
-     if(k!==survivors.length)throw Error('Gravity lost a symbol.');
+     let top=0;
+     for(let end=0;end<=7;end++)if(end===7||board[end*7+x]?.kind==='ice'){
+      const survivors=[];for(let y=top;y<end;y++)if(board[y*7+x])survivors.push(board[y*7+x]);
+      const first=end-survivors.length;
+      for(let y=top;y<end;y++){const i=y*7+x,old=survivors[y-first];if(y<first){if(raw[i])throw Error('Gravity filled an empty cell.');}else{if(!raw[i]||old.serverId!==raw[i].id||raw[i].id===19)throw Error('Gravity differs from server board.');next[i]=this.piece(raw[i],old);}}
+      if(end<7){const i=end*7+x,old=board[i];if(raw[i]?.id!==19||raw[i].health!==old.hp||raw[i].multiplier!==old.mult)throw Error('Server ice health conflict or displaced ice during gravity.');next[i]=this.piece(raw[i],old);}top=end+1;
+     }
     }
     board=next;phase='fall';continue;
    }
@@ -350,27 +622,34 @@ class RgsBoardAdapter {
    }
    throw Error('Unsupported RGS event: '+String(e.type)+(e.action?' / '+e.action:''));
   }
-  if(phase!=='ready')throw Error('Incomplete cascade sequence.');
+  if(phase!=='ready'||damage.size||magicCells.length||collected.length)throw Error('Incomplete cascade sequence.');
   const helpers=rgsHelpers(bet.events,board);
   if(!accepted&&bet.events.some(e=>e.type!=='helper'))throw Error('Invalid rejected move.');
-  return {accepted,board,events,helpers};
+  return {accepted,board,events,helpers,meter,mult};
  }
 }
 
 
 const RGS_TEST_CONFIG=Object.freeze({url:'wss://dev.skyline-api.net/wss',game:'csw1'});
+function rgsFreeSpin(value,previous=null){
+ if(value===undefined||value===null){if(previous)throw Error('Bonus completion/return contract is not verified yet.');return null;}
+ const {counter,limit}=value;
+ if(!Number.isInteger(counter)||!Number.isInteger(limit)||counter<0||limit<1||counter>limit)throw Error('Invalid server bonus progress.');
+ if(previous&&(counter<previous.counter||limit<previous.limit))throw Error('Server bonus progress moved backwards.');
+ return {counter,limit,moves:limit-counter};
+}
 class ServerRGS {
  constructor({transport,location=globalThis.location,onFault=()=>{}}={}){
   this.remote=true;this.ready=false;this.ctx=null;this.adapter=new RgsBoardAdapter();this.location=location;this.onFault=onFault;
   this.transport=transport||new RgsTransport({...RGS_TEST_CONFIG,onFault:(...args)=>{this.ready=false;onFault(...args);}});
-  this.s={board:[],balance:0,bet:0,mode:'base',bonus:null,meter:0,history:[],version:0};this.helpers=[];this.bets=[];
+  this.s={board:[],balance:0,bet:0,mode:'base',bonus:null,freeRounds:null,meter:0,mult:1,history:[],version:0};this.helpers=[];this.bets=[];
  }
- get playable(){return this.ready&&this.transport.healthy&&!this.transport.pending;}
+ get playable(){return this.ready&&this.transport.healthy&&!this.transport.pending&&!this.s.bonus?.awaitingCompletion;}
  snapshot(){return structuredClone(this.s);}
- cost(){return this.s.bet;}
+ cost(){return this.s.bonus||this.s.freeRounds?0:this.s.bet;}
  moves(){return this.helpers.map(p=>[...p]);}
- fail(message,unknown=false){this.ready=false;this.transport.unknownOutcome||=unknown;this.transport.fail(message);}
- wallet(reply){const wallet=reply.wallet;if(!wallet||!Number.isFinite(wallet.balance)||wallet.balance<0)throw Error('Invalid server wallet.');return wallet;}
+ fail(message,unknown=false){const known=['Invalid free rounds stake.','Invalid free rounds counter.','Invalid free rounds quantity.','Free rounds progress is inconsistent.','Awarded moves need an initial board context from RGS. Reset was not sent.','Award restoration requires a confirmed settled board.','Missing initial game context or bet.','Unexpected game configuration.'];if(known.includes(message))this.transport.log?.('rgs-validation',message+' Play blocked; request not repeated.');this.ready=false;this.transport.unknownOutcome||=unknown;this.transport.fail(message);}
+ wallet(reply){const wallet=reply.wallet;if(!wallet||!Number.isFinite(wallet.balance)||wallet.balance<0)throw Error('Invalid server wallet.');if(wallet.currency!==undefined&&!/^[A-Z0-9]{2,8}$/.test(wallet.currency))throw Error('Invalid wallet currency.');if(wallet.decimals!==undefined&&(!Number.isInteger(wallet.decimals)||wallet.decimals<0||wallet.decimals>8))throw Error('Invalid wallet decimals.');return wallet;}
  async initialize(){
   try{
    await this.transport.connect();
@@ -381,17 +660,28 @@ class ServerRGS {
    if(game.game?.tag!==RGS_TEST_CONFIG.game||game.game.layout?.width!==7||game.game.layout?.height!==7||!game.game.paytable)throw Error('Unexpected game configuration.');
    if(!Array.isArray(game.bets)||!game.bets.length||game.bets.some(b=>!Number.isFinite(b)||b<=0))throw Error('Invalid server bets.');
    this.bets=[...new Set(game.bets)].sort((a,b)=>a-b);this.config=game.game;
+   // Casino awards are a separate protocol, not the in-game ice feature.
+   const award=readFreeRounds(game.bonus,game.bonus?.bet_sum,null,game.wallet?.decimals??2);
+   if(award?.knownWin===null)this.transport.log?.('award-total','Initial free rounds total is invalid. Wallet preserved; winnings displayed unavailable.');
+   if(award?.remaining){
+    const previous=game.previous;
+    if(typeof previous?.ctx!=='string'||!previous.ctx)throw Error('Awarded moves need an initial board context from RGS. Reset was not sent.');
+    if(!Array.isArray(previous.events)||previous.events.some(e=>e.type!=='helper')||previous.freespin)throw Error('Award restoration requires a confirmed settled board.');
+    const board=this.adapter.initial(previous.reels);this.helpers=rgsHelpers(previous.events,board);this.ctx=previous.ctx;
+    const wallet=this.wallet(game);this.s={...this.s,board,balance:wallet.balance,currency:wallet.currency,decimals:wallet.decimals??2,bet:award.bet,freeRounds:award};this.ready=this.transport.healthy;return this.snapshot();
+   }
    const initialWallet=this.wallet(game);
    const reply=await this.transport.request({set:'bet',action:'reset'}),bet=reply.bet,wallet=this.wallet(reply);
    if(!bet||!Array.isArray(bet.events)||bet.events.some(e=>e.type!=='helper')||bet.total?.bet!==0||(bet.total?.win??0)!==0||wallet.balance!==initialWallet.balance)throw Error('Unexpected startup result.');
    if(typeof bet.ctx!=='string'||!bet.ctx||!this.bets.includes(bet.bet_sum))throw Error('Missing initial game context or bet.');
    const board=this.adapter.initial(bet.reels),helpers=rgsHelpers(bet.events,board);
-   this.ctx=bet.ctx;this.helpers=helpers;this.s={...this.s,board,balance:wallet.balance,currency:wallet.currency,bet:bet.bet_sum};
+   if(bet.freespin||board.some(c=>c.kind==='ice'))throw Error('Unexpected bonus during fresh-session reset.');
+   this.ctx=bet.ctx;this.helpers=helpers;this.s={...this.s,board,balance:wallet.balance,currency:wallet.currency??initialWallet.currency,decimals:wallet.decimals??initialWallet.decimals??2,bet:bet.bet_sum};
    this.ready=this.transport.healthy;if(!this.ready)throw Error('Connection lost during startup.');return this.snapshot();
   }catch(e){this.fail(e.message);throw e;}
  }
  async setBet(value){
-  if(!this.playable)throw Error('Session is not ready.');if(!this.bets.includes(value))throw Error('Unsupported bet.');
+  if(!this.playable)throw Error('Session is not ready.');if(this.s.bonus||this.s.freeRounds)throw Error('The stake is locked during free moves.');if(!this.bets.includes(value))throw Error('Unsupported bet.');
   try{
    const reply=await this.transport.request({set:'options',bet_sum:value,ctx:this.ctx});
    if(reply.options?.bet_sum!==value)throw Error('Server did not confirm the selected bet.');
@@ -400,20 +690,45 @@ class ServerRGS {
  }
  async play(a,b){
   if(!this.playable)throw Error('Session is not ready.');const move=rgsMove(a,b);
+  if(this.s.board[a]?.kind==='ice'||this.s.board[b]?.kind==='ice')throw Error('Ice cannot be swapped.');
+  // The latest server helper is authoritative. Invalid exchanges must not send
+  // a bet: csw1 can return an unrelated/stale board for rejected moves after a
+  // cascade. Keep ctx, board, balance and progress unchanged; the UI reverses
+  // its visual preview. Do not relax response checks for moves we do submit.
+  if(!this.helpers.some(([x,y])=>(x===a&&y===b)||(x===b&&y===a))){
+   return {accepted:false,board:structuredClone(this.s.board),events:[],helpers:this.moves(),meter:this.s.meter,mult:this.s.mult,state:this.snapshot(),win:0};
+  }
   let sent=false;
   try{
    sent=true;const reply=await this.transport.request({set:'bet',action:'move',...move,ctx:this.ctx});
    const bet=reply.bet,wallet=this.wallet(reply);
-   if(typeof bet?.ctx!=='string'||!bet.ctx||!this.bets.includes(bet.bet_sum))throw Error('Incomplete move response.');
+   if(bet?.bonus){const award=readFreeRounds(bet.bonus,bet.bet_sum,this.s.freeRounds);if(award.retainedStake)this.transport.log?.('award-stake','Free rounds reply omitted stake. Retained the confirmed award stake.');bet.bet_sum=award.bet;}
+   if(typeof bet?.ctx!=='string'||!bet.ctx||!(this.bets.includes(bet.bet_sum)||this.s.freeRounds?.bet===bet.bet_sum))throw Error('Incomplete move response.');
    if(bet.bet_sum!==this.s.bet)throw Error('Server used a different bet.');
-   const result=this.adapter.replay(this.s.board,bet,[a,b]);
    const win=bet.total?.win??0,cost=bet.total?.bet;
    if(!Number.isFinite(win)||win<0||!Number.isFinite(cost)||cost<0)throw Error('Invalid server totals.');
+   const bonus=rgsFreeSpin(bet.freespin,this.s.bonus),bonusStarted=!!bonus&&!this.s.bonus;
+   let result;
+   if(bonusStarted){
+    if(bonus.counter!==0||cost!==0||win!==0||wallet.balance!==this.s.balance||!Array.isArray(bet.events)||bet.events.some(e=>e.type!=='helper'))throw Error('Unverified bonus entry sequence.');
+    const board=this.adapter.initial(bet.reels);
+    if(board.some((c,i)=>(c.kind==='ice')!==(i>=35)))throw Error('Unexpected initial ice layout.');
+    result={accepted:true,board,events:[],helpers:rgsHelpers(bet.events,board),meter:this.s.meter,mult:1};
+   }else{
+    if(!bonus&&this.s.board.some(c=>c.kind==='ice'))throw Error('Missing server bonus state.');
+    result=this.adapter.replay(this.s.board,bet,[a,b],{meter:this.s.meter,mult:this.s.bonus?this.s.mult:1});
+    if(bonus&&bonus.counter!==this.s.bonus.counter+(result.accepted?1:0))throw Error('Unexpected bonus move counter.');
+   }
    if(!result.accepted&&(win||cost))throw Error('Rejected swap has unexpected totals.');
+   if(!result.accepted)result.mult=this.s.mult;
+   const awardResult=result.accepted&&!bonusStarted?settleFreeRounds(this.s.freeRounds,bet.bonus,bet.bet_sum,win,this.s.decimals):{active:this.s.freeRounds,completed:null};
+   if(awardResult.completed?.knownWin===null)this.transport.log?.('award-total','Final free rounds total is invalid. Wallet preserved; winnings displayed unavailable.');
    this.ctx=bet.ctx;this.helpers=result.helpers;
-   this.s={...this.s,board:result.board,balance:wallet.balance,currency:wallet.currency,version:this.s.version+1};
-   if(result.accepted)this.s.history=[{time:Date.now(),cost,win,mult:1,bonus:false},...this.s.history].slice(0,100);
-   return {...result,state:this.snapshot(),win};
+   this.s={...this.s,freeRounds:awardResult.active,board:result.board,balance:wallet.balance,currency:wallet.currency??this.s.currency,version:this.s.version+1,meter:result.meter,mult:result.mult,
+    bonus:bonus?{...bonus,bet:this.s.bet,mult:result.mult,lastMoveWin:win,awaitingCompletion:bonus.moves===0}:null,
+    serverWarning:(bonus||this.s.freeRounds||bet.bonus)&&cost>0?'RGS issue: bonus move charged '+cost.toFixed(2):null,lastCost:cost};
+   if(result.accepted&&!bonusStarted)this.s.history=[{time:Date.now(),cost,win,mult:result.mult,bonus:!!bonus||!!this.s.freeRounds||!!awardResult.completed},...this.s.history].slice(0,100);
+   return {...result,state:this.snapshot(),win,bonusStarted,freeRoundsCompleted:awardResult.completed};
   }catch(e){this.fail(e.message,sent);throw e;}
  }
 }
@@ -472,24 +787,69 @@ class SwipeHint {
  }
 }
 
-const $=s=>document.querySelector(s), money=n=>n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
-await mountKingdom($('#game')).catch(error=>console.warn('Kingdom background fallback',error));
+class HoldInput {
+ constructor({act,canAct=()=>true,onHeld=()=>{},onManual=()=>{},threshold=320,interval=90,setTimer=(...args)=>setTimeout(...args),clearTimer=id=>clearTimeout(id)}){Object.assign(this,{act,canAct,onHeld,onManual,threshold,interval,setTimer,clearTimer});this.sources=new Set();this.generation=0;this.active=false;}
+ press(source){
+  if(this.sources.has(source))return;const first=this.sources.size===0;this.sources.add(source);if(!first)return;
+  const generation=++this.generation;this.onManual();if(this.canAct())this.act();
+  if(generation!==this.generation||!this.sources.size)return;
+  this.timer=this.setTimer(()=>{if(generation!==this.generation||!this.sources.size)return;this.active=true;this.onHeld(true);this.pulse(generation);},this.threshold);
+ }
+ pulse(generation){if(generation!==this.generation||!this.sources.size)return;if(this.canAct())this.act();if(generation===this.generation&&this.sources.size)this.timer=this.setTimer(()=>this.pulse(generation),this.interval);}
+ release(source){this.sources.delete(source);if(!this.sources.size)this.cancel();}
+ cancel(){++this.generation;this.clearTimer(this.timer);this.sources.clear();this.active=false;this.onHeld(false);}
+}
+function bindHoldInput(button,controller,{cancel=()=>controller.cancel(),ownsSpace=()=>true,window:win=window,document:doc=document}={}){
+ let pointerId=null;
+ button.addEventListener('pointerdown',e=>{if(e.button!==0||!e.isPrimary||button.disabled||pointerId!==null)return;e.preventDefault();pointerId=e.pointerId;button.setPointerCapture(e.pointerId);controller.press('pointer');});
+ const release=e=>{if(e.pointerId!==pointerId)return;pointerId=null;controller.release('pointer');};
+ button.addEventListener('pointerup',release);button.addEventListener('pointercancel',release);button.addEventListener('lostpointercapture',release);
+ button.addEventListener('click',e=>{if(e.detail===0&&!button.disabled&&!controller.sources.size){controller.press('accessible');controller.release('accessible');}});
+ win.addEventListener('keydown',e=>{if(e.code!=='Space'||!ownsSpace())return;const t=e.target;if(t!==button&&(t.isContentEditable||t.closest?.('input,textarea,select,button,a,[contenteditable=true],[role=dialog],dialog')))return;e.preventDefault();if(e.repeat)return;controller.press('space');});
+ win.addEventListener('keyup',e=>{if(e.code==='Space'){controller.release('space');if(e.target===button)e.preventDefault();}});
+ const cancelAll=()=>{pointerId=null;cancel();};win.addEventListener('blur',cancelAll);doc.addEventListener('visibilitychange',()=>{if(doc.hidden)cancelAll();});
+ return controller;
+}
+
+function mountLayout(element){
+ let frame;
+ const resize=()=>{cancelAnimationFrame(frame);frame=requestAnimationFrame(()=>{
+  const viewport=window.visualViewport,insets=getComputedStyle(document.body),w=(viewport?.width??innerWidth)-(parseFloat(insets.paddingLeft)||0)-(parseFloat(insets.paddingRight)||0),h=(viewport?.height??innerHeight)-(parseFloat(insets.paddingTop)||0)-(parseFloat(insets.paddingBottom)||0),portrait=w<h;
+  element.dataset.layout=portrait?'portrait':'landscape';
+  element.style.setProperty('--view-width',w+'px');element.style.setProperty('--view-height',h+'px');
+  // Keep controls usable on tiny/zoomed viewports; allow deliberate vertical scroll.
+  const height=Math.max(h,portrait?570:440);element.style.setProperty('--game-height',height+'px');
+  const board=portrait?Math.min(w-16,height-340):Math.min(w*.49,height-148);
+  element.style.setProperty('--board-size',Math.max(120,board)+'px');
+ });};
+ window.addEventListener('resize',resize);visualViewport?.addEventListener('resize',resize);document.fonts?.ready.then(resize);resize();
+ return ()=>{cancelAnimationFrame(frame);window.removeEventListener('resize',resize);visualViewport?.removeEventListener('resize',resize);};
+}
+
+
+async function startGame(){
+const $=s=>document.querySelector(s), money=n=>Number.isFinite(n)?n.toLocaleString('en-US',{minimumFractionDigits:state?.decimals??2,maximumFractionDigits:state?.decimals??2}):'—';
+mountLayout($('#game'));
+const sceneReady=prepareTask('scene',async()=>{await Promise.all([mountKingdom($('#game')),...[...document.images].map(img=>img.decode()),new Promise((resolve,reject)=>{const img=new Image();img.onload=resolve;img.onerror=reject;img.src='public/kingdom/candy-court.png';})]);}).then(()=>null,error=>error);
 const KEY='sweet-cascade-v1';let saved;try{saved=JSON.parse(localStorage.getItem(KEY));}catch{}
 const serverMode=new URLSearchParams(location.search).get('mode')!=='demo';
-const rgs=serverMode?new ServerRGS({onFault:()=>queueMicrotask(showConnectionFault)}):new DemoRGS(saved),sound=new Sound();let state=rgs.snapshot(),busy=serverMode,held=false,auto=0,speed=1,selected=null,displayWin=state.bonus?.win||0,displayMult=state.bonus?.mult||1,lastInput=Date.now();
-await Promise.all([document.fonts.load('700 28px Alexandria'),sound.loadSamples()]);
-const app=new PIXI.Application();await app.init({width:711,height:711,backgroundAlpha:0,antialias:true,resolution:Math.min(devicePixelRatio,2),autoDensity:true,preference:'webgl'});$('#board').appendChild(app.canvas);
+const rgs=serverMode?new ServerRGS({onFault:()=>{if(!startupComplete)failStartup('Connection could not be prepared. Please reload.');else queueMicrotask(showConnectionFault);}}):new DemoRGS(saved),sound=new Sound();let state=rgs.snapshot(),busy=serverMode,held=false,auto=0,speed=1,selected=null,displayWin=state.bonus?.win||0,displayMult=state.bonus?.mult||1,lastInput=Date.now();
+let startupComplete=false,roundRunning=false,fastRequested=false,persistentTurbo=false,autoTimer=null;
+const sessionReady=prepareTask('session',async()=>serverMode?await rgs.initialize():rgs.snapshot()).then(value=>({value}),error=>({error}));
+await Promise.all([prepareTask('font',()=>document.fonts.load('700 28px Alexandria')),prepareTask('audio',()=>sound.loadSamples())]);
+const sceneError=await sceneReady;if(sceneError)throw sceneError;
+const app=new PIXI.Application();await prepareTask('renderer',()=>app.init({width:711,height:711,backgroundAlpha:0,antialias:true,resolution:Math.min(devicePixelRatio,2),autoDensity:true,preference:'webgl'}));$('#board').appendChild(app.canvas);
 const stage=new PIXI.Container();app.stage.addChild(stage);stage.position.set(5.4,5.4);const frame=new PIXI.Sprite(frameTexture());frame.position.set(-5.4,-5.4);stage.addChild(frame);const bg=new PIXI.Graphics();stage.addChild(bg);
 for(let i=0;i<49;i++){const x=20+i%7*94,y=20+Math.floor(i/7)*94;bg.roundRect(x,y,92,92,9).fill((Math.floor(i/7)+i%7)%2?0x1b2742:0x142039).stroke({color:0x34405e,width:1});}
 const hoverCell=new PIXI.Graphics().roundRect(-43,-43,86,86,10).fill(0x9abfff);hoverCell.filters=[new PIXI.BlurFilter({strength:5,quality:4})];hoverCell.alpha=0;hoverCell.eventMode='none';bg.addChild(hoverCell);let hoveredCell=null,hoverOpacity=0;
 const pieces=new PIXI.Container(),fx=new PIXI.Container();stage.addChild(pieces,fx);const textures=Array.from({length:6},(_,i)=>candyTexture(i)),special={bomb:specialTexture('bomb'),ice:specialTexture('ice'),rocket:Array.from({length:4},(_,i)=>specialTexture('rocket',i))};const nodes=new Map();let visual=[];const anims=[],particles=[];
 const candyBounds=[],iceTextures=[],boosterArt={};
-try{const atlas=await PIXI.Assets.load('public/boosters.png');const w=atlas.width/2,h=atlas.height,canvas=document.createElement('canvas');canvas.width=atlas.width;canvas.height=h;const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(atlas.source.resource,0,0);for(let k=0;k<2;k++){const pixels=ctx.getImageData(k*w,0,w,h).data;let left=w,top=h,right=0,bottom=0;for(let y=0;y<h;y++)for(let x=0;x<w;x++)if(pixels[(y*w+x)*4+3]>100){left=Math.min(left,x);top=Math.min(top,y);right=Math.max(right,x);bottom=Math.max(bottom,y);}boosterArt[k===0?'bomb':'rocket']={texture:new PIXI.Texture({source:atlas.source,frame:new PIXI.Rectangle(k*w,0,w,h)}),w,h,cx:(left+right)/2,cy:(top+bottom)/2,size:Math.max(right-left+1,bottom-top+1)};}}catch(e){console.warn('Fallback booster art',e);}
-try{const atlas=await PIXI.Assets.load('public/ice.png');for(let i=0;i<3;i++)iceTextures[i]=new PIXI.Texture({source:atlas.source,frame:new PIXI.Rectangle(i*512,0,512,512)});}catch(e){console.warn('Fallback ice art',e);}
+try{const atlas=await prepareTask('boosters',()=>PIXI.Assets.load('public/boosters.png'));const w=atlas.width/2,h=atlas.height,canvas=document.createElement('canvas');canvas.width=atlas.width;canvas.height=h;const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(atlas.source.resource,0,0);for(let k=0;k<2;k++){const pixels=ctx.getImageData(k*w,0,w,h).data;let left=w,top=h,right=0,bottom=0;for(let y=0;y<h;y++)for(let x=0;x<w;x++)if(pixels[(y*w+x)*4+3]>100){left=Math.min(left,x);top=Math.min(top,y);right=Math.max(right,x);bottom=Math.max(bottom,y);}boosterArt[k===0?'bomb':'rocket']={texture:new PIXI.Texture({source:atlas.source,frame:new PIXI.Rectangle(k*w,0,w,h)}),w,h,cx:(left+right)/2,cy:(top+bottom)/2,size:Math.max(right-left+1,bottom-top+1)};}}catch(e){throw e;}
+try{const atlas=await prepareTask('ice',()=>PIXI.Assets.load('public/ice.png'));for(let i=0;i<3;i++)iceTextures[i]=new PIXI.Texture({source:atlas.source,frame:new PIXI.Rectangle(i*512,0,512,512)});}catch(e){throw e;}
 function symbolGlow(n,color=0xffefac,alpha=.65,spread=1.1,blur=7){const source=n.sprite,g=new PIXI.Sprite(source.texture);g.anchor.copyFrom(source.anchor);g.scale.copyFrom(source.scale);const rgb=new PIXI.Color(color).toArray(),white=new PIXI.ColorMatrixFilter();white.matrix=[0,0,0,0,rgb[0],0,0,0,0,rgb[1],0,0,0,0,rgb[2],0,0,0,1,0];g.filters=[white,new PIXI.BlurFilter({strength:blur,quality:4})];g.glowSpread=spread;g.blendMode='add';g.alpha=alpha;n.addChildAt(g,0);(n.glows??=[]).push(g);return g;}
 function signature(c){return [c.kind,c.color,c.hp,c.magic,c.mult,c.dir].join(':');}
-try {const atlas=await PIXI.Assets.load('public/candies.png');const canvas=document.createElement('canvas');canvas.width=1536;canvas.height=1024;const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(atlas.source.resource,0,0);for(let i=0;i<6;i++){const ox=i%3*512,oy=Math.floor(i/3)*512;const pixels=ctx.getImageData(ox,oy,512,512).data;let left=512,top=512,right=0,bottom=0;for(let y=0;y<512;y++)for(let x=0;x<512;x++)if(pixels[(y*512+x)*4+3]>100){left=Math.min(left,x);top=Math.min(top,y);right=Math.max(right,x);bottom=Math.max(bottom,y);}candyBounds[i]={cx:(left+right)/2,cy:(top+bottom)/2,size:Math.max(right-left+1,bottom-top+1)};textures[i]=new PIXI.Texture({source:atlas.source,frame:new PIXI.Rectangle(ox,oy,512,512)});}}catch(e){console.warn('Using procedural fallback candy art',e);}
-try{const candy=await PIXI.Assets.load('public/pink-candy.png');const canvas=document.createElement('canvas');canvas.width=canvas.height=512;const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(candy.source.resource,0,0,512,512);const data=ctx.getImageData(0,0,512,512).data;let left=512,top=512,right=0,bottom=0;for(let y=0;y<512;y++)for(let x=0;x<512;x++)if(data[(y*512+x)*4+3]>100){left=Math.min(left,x);top=Math.min(top,y);right=Math.max(right,x);bottom=Math.max(bottom,y);}textures[1]=candy;candyBounds[1]={cx:(left+right)/2,cy:(top+bottom)/2,size:Math.max(right-left+1,bottom-top+1)};}catch(e){console.warn('Pink candy fallback',e);}
+try {const atlas=await prepareTask('candies',()=>PIXI.Assets.load('public/candies.png'));const canvas=document.createElement('canvas');canvas.width=1536;canvas.height=1024;const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(atlas.source.resource,0,0);for(let i=0;i<6;i++){const ox=i%3*512,oy=Math.floor(i/3)*512;const pixels=ctx.getImageData(ox,oy,512,512).data;let left=512,top=512,right=0,bottom=0;for(let y=0;y<512;y++)for(let x=0;x<512;x++)if(pixels[(y*512+x)*4+3]>100){left=Math.min(left,x);top=Math.min(top,y);right=Math.max(right,x);bottom=Math.max(bottom,y);}candyBounds[i]={cx:(left+right)/2,cy:(top+bottom)/2,size:Math.max(right-left+1,bottom-top+1)};textures[i]=new PIXI.Texture({source:atlas.source,frame:new PIXI.Rectangle(ox,oy,512,512)});}}catch(e){throw e;}
+try{const candy=await prepareTask('pink',()=>PIXI.Assets.load('public/pink-candy.png'));const canvas=document.createElement('canvas');canvas.width=canvas.height=512;const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(candy.source.resource,0,0,512,512);const data=ctx.getImageData(0,0,512,512).data;let left=512,top=512,right=0,bottom=0;for(let y=0;y<512;y++)for(let x=0;x<512;x++)if(data[(y*512+x)*4+3]>100){left=Math.min(left,x);top=Math.min(top,y);right=Math.max(right,x);bottom=Math.max(bottom,y);}textures[1]=candy;candyBounds[1]={cx:(left+right)/2,cy:(top+bottom)/2,size:Math.max(right-left+1,bottom-top+1)};}catch(e){throw e;}
 const pos=i=>({x:66+i%7*94,y:66+Math.floor(i/7)*94});
 const swipeHint=new SwipeHint(stage,pos);
 document.addEventListener('pointerdown',()=>swipeHint.reset(),{capture:true});
@@ -507,10 +867,12 @@ function popFlash(i){const g=new PIXI.Graphics();for(let r=40;r>0;r-=4)g.circle(
 function float(text,i,color='#ffef9c'){let t=label(text,30,color);Object.assign(t,pos(i));fx.addChild(t);tween(t,{y:t.y-70,alpha:0},800).then(()=>t.destroy());}
 async function shuffleBoard(board){sound.play('shuffle');float('SHUFFLE',24);const moving=()=>[...nodes.values()].filter(n=>n.kind!=='ice');await Promise.all(moving().map(n=>Promise.all([tween(n,{x:350,y:350,rotation:Math.PI,alpha:0},400),tween(n.scale,{x:.1,y:.1},400)])));draw(board);for(const n of moving()){n.rotation=0;n.scale.set(.1);n.alpha=0;}await Promise.all(moving().map(n=>Promise.all([tween(n.scale,{x:1,y:1},300),tween(n,{alpha:1},250)])));}
 async function effect(e){let p=pos(e.i);if(e.kind==='bomb'){sound.play('bomb');let ring=new PIXI.Graphics().circle(0,0,20).stroke({color:0xffd67b,width:12});Object.assign(ring,p);fx.addChild(ring);tween(ring.scale,{x:7,y:7},330);tween(ring,{alpha:0},330).then(()=>ring.destroy());await tween(stage,{x:11.4,y:2.4},40);await tween(stage,{x:1.4,y:9.4},50);await tween(stage,{x:5.4,y:5.4},60);}else{sound.play('rocket');let trail=new PIXI.Graphics();let dx=[0,1,0,-1][e.dir],dy=[-1,0,1,0][e.dir];trail.moveTo(p.x,p.y).lineTo(p.x+dx*700,p.y+dy*700).stroke({color:0xfff6ac,width:16,alpha:.85});fx.addChild(trail);tween(trail,{alpha:0},300).then(()=>trail.destroy());}}
-function hud(){const b=state.bonus;$('#balance').textContent=money(state.balance);$('#bet').textContent=money(state.bet);$('#cost').textContent=b?'FREE MOVE':money(rgs.cost())+' per move';$('#win').textContent=money(displayWin);$('#mult').textContent=displayMult+'×';$('#win-label').textContent=b?'BONUS WIN':'WIN';$('#mode').textContent=b?'FROSTED FACTORY':({base:'NORMAL PLAY',luck:'EXTRA LUCK · ×2',enhanced:'ENHANCED MOVES · ×50',mayhem:'MULTI MAYHEM · ×1000'}[state.mode]);$('#meter-title').textContent=b?'MOVES LEFT: '+b.moves:'ICE BONUS';$('#moves-label').textContent=b?'Magic candy = +1 move':'Collect 3 magic candies';$('#meter').style.display=b?'none':'flex';[...$('#meter').children].forEach((e,i)=>e.classList.toggle('on',i<state.meter));$('#game').classList.toggle('bonus-active',!!b);for(const id of ['minus','plus','bonus'])$('#'+id).disabled=busy||!!b;$('#play').disabled=busy||(serverMode&&!rgs.playable);if(serverMode){for(const id of ['minus','plus','auto'])$('#'+id).disabled=busy||!rgs.playable;$('#bonus').disabled=true;$('#bonus').title='Not available in this RGS version';$('#meter-title').textContent='RGS TEST';$('#moves-label').textContent='Bonuses coming later';$('#meter').style.display='none';$('#mult').style.visibility='hidden';$('#connection').textContent=rgs.playable?'● Test server · '+(state.currency||'credits'):(rgs.transport.fault?'● Connection lost':'● Connecting…');}$('#auto').classList.toggle('active',auto>0);$('#auto').title=auto?'Remaining: '+auto:'Autoplay';}
+function hud(){const b=state.bonus,award=state.freeRounds;$('#balance').textContent=money(state.balance);$('#bet').textContent=money(state.bet);$('#cost').textContent=b||award?'FREE MOVE':money(rgs.cost())+' per move';$('#win').textContent=money(displayWin);$('#mult').textContent=displayMult+'×';$('#win-label').textContent=b?'BONUS WIN':'WIN';$('#mode').textContent=b?'FROSTED FACTORY':({base:'NORMAL PLAY',luck:'EXTRA LUCK · ×2',enhanced:'ENHANCED MOVES · ×50',mayhem:'MULTI MAYHEM · ×1000'}[state.mode]);$('#meter-title').textContent=b?'MOVES LEFT: '+b.moves:'ICE BONUS';$('#moves-label').textContent=b?'Magic candy = +1 move':'Collect 3 magic candies';$('#meter').style.display=b?'none':'flex';[...$('#meter').children].forEach((e,i)=>e.classList.toggle('on',i<state.meter));$('#game').classList.toggle('bonus-active',!!b);for(const id of ['minus','plus','bonus'])$('#'+id).disabled=busy||!!b;$('#play').disabled=!startupComplete||(!roundRunning&&busy)||(serverMode&&(!rgs.transport.healthy||(!roundRunning&&!rgs.playable)));$('#play').setAttribute('aria-label',roundRunning?'Speed up current move':'Play');if(serverMode){for(const id of ['minus','plus','auto'])$('#'+id).disabled=busy||!rgs.playable||(id!=='auto'&&!!(b||award));$('#bonus').disabled=true;$('#bonus').title='Not available in this RGS version';$('#mult').style.visibility='visible';if(b||award){$('#win-label').textContent='LAST MOVE WIN';$('#cost').textContent=state.serverWarning?'RGS CHARGED '+money(state.lastCost):'FREE MOVE';}$('#connection').textContent=state.bonus?.awaitingCompletion?'● Bonus end awaiting server verification':state.serverWarning|| (rgs.playable?'● Test server · '+(state.currency||'credits'):(rgs.transport.fault?'● RGS session stopped':'● Connecting…'));}if(award){$('#meter').style.display='none';$('#meter-title').textContent='FREE MOVES: '+award.remaining+(b?' · ICE: '+b.moves:'');$('#moves-label').textContent=(award.completeTotal?'TOTAL WON ':'WON SINCE RELOAD ')+(state.currency?state.currency+' ':'')+money(award.knownWin);$('#minus').disabled=$('#plus').disabled=true;}$('#auto').classList.toggle('active',auto>0);$('#auto').title=auto?'Remaining: '+auto:'Autoplay';}
 function persist(){if(serverMode)return;localStorage.setItem(KEY,JSON.stringify(rgs.snapshot()));}
 let toastTimer;function toast(t){$('#toast').textContent=t;$('#toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),3000);}
-function stop(){held=false;auto=0;hud();}
+function updateSpeed(){speed=persistentTurbo||held||fastRequested?1.8:1;}
+const hold=bindHoldInput($('#play'),new HoldInput({act:()=>{if(roundRunning){if(!hold.active)fastRequested=true;updateSpeed();}else play();},canAct:()=>startupComplete&&!document.hidden&&!$('#dialog').open&&(!serverMode||rgs.transport.healthy)&&(roundRunning||(!busy&&(!serverMode||rgs.playable))),onHeld:value=>{held=value;updateSpeed();},onManual:()=>{auto=0;clearTimeout(autoTimer);hud();}}),{ownsSpace:()=>startupComplete&&!$('#dialog').open,cancel:()=>{stop();cancelDrag();}});
+function stop(){hold.cancel();held=false;auto=0;fastRequested=false;updateSpeed();clearTimeout(autoTimer);hud();}
 function modal(html){swipeHint.reset();stop();$('#dialog-content').innerHTML=html;$('#dialog').showModal();}
 function close(){sound.cancelCelebration();$('#dialog').close();lastInput=Date.now();}$('#close').onclick=close;$('#dialog').addEventListener('close',()=>sound.cancelCelebration());
 document.addEventListener('pointerdown',()=>sound.unlock(),{once:true});
@@ -522,7 +884,7 @@ function drag(e){if(!pointer||busy)return;const d=pointer,dx=e.global.x-d.x,dy=e
 function up(i,e){if(!pointer||busy)return;const d=pointer;if(e)drag(e);const target=d.moved?d.target:d.second;pointer=null;select(null);if(target!==null){play(d.i,target,d.swishPlayed===true);}else{restoreDrag(d);if(!d.moved)select(d.i);}}
 app.stage.eventMode='static';app.stage.hitArea=new PIXI.Rectangle(0,0,700,700);app.stage.on('globalpointermove',e=>{const col=Math.floor((e.global.x-25.4)/94),row=Math.floor((e.global.y-25.4)/94);hoveredCell=col>=0&&col<7&&row>=0&&row<7?row*7+col:null;drag(e);});app.canvas.addEventListener('pointerleave',()=>{hoveredCell=null;});app.stage.on('pointerup',e=>{if(pointer)up(pointer.i,e);});app.stage.on('pointerupoutside',cancelDrag);app.canvas.addEventListener('pointercancel',cancelDrag);
 function select(i){selected=i;}
-async function play(a,b,swishPlayed=false){if(busy||(serverMode&&!rgs.playable)||pointer||$('#dialog').open)return;sound.unlock();sound.cancelCelebration();sound.cascade=0;lastInput=Date.now();if(a===undefined){const m=serverMode?rgs.moves():moves(state.board);if(!m.length){stop();toast('No moves available. Reload to start a new test session.');return;}[a,b]=m[Math.floor(Math.random()*m.length)];}if(!Number.isInteger(a)||!Number.isInteger(b)||!visual[a]||!visual[b]||Math.abs(a%7-b%7)+Math.abs(Math.floor(a/7)-Math.floor(b/7))!==1){restoreDrag({i:a,neighbor:b});return;}busy=true;swipeHint.reset();select(null);hud();$('#message').style.opacity=0;
+async function play(a,b,swishPlayed=false){if(!startupComplete||busy||(serverMode&&!rgs.playable)||pointer||$('#dialog').open)return;sound.unlock();sound.cancelCelebration();sound.cascade=0;lastInput=Date.now();if(a===undefined){const m=serverMode?rgs.moves():moves(state.board);if(!m.length){stop();toast('No moves available. Reload to start a new test session.');return;}[a,b]=m[Math.floor(Math.random()*m.length)];}if(!Number.isInteger(a)||!Number.isInteger(b)||!visual[a]||!visual[b]||visual[a].kind==='ice'||visual[b].kind==='ice'||Math.abs(a%7-b%7)+Math.abs(Math.floor(a/7)-Math.floor(b/7))!==1){restoreDrag({i:a,neighbor:b});return;}busy=true;roundRunning=true;swipeHint.reset();select(null);hud();$('#message').style.opacity=0;
  try{let before=rgs.snapshot(),result;const previewSwap=serverMode;
   try{const response=rgs.play(a,b,crypto.randomUUID(),state.version);
    if(previewSwap){if(!swishPlayed){sound.play('swap');swishPlayed=true;}const na=nodes.get(visual[a].id),nb=nodes.get(visual[b].id),pa=pos(a),pb=pos(b);
@@ -533,47 +895,60 @@ async function play(a,b,swishPlayed=false){if(busy||(serverMode&&!rgs.playable)|
   }catch(e){if(!serverMode)rgs.s=before;throw e;}
   if(!result.accepted){sound.play('invalid');const na=nodes.get(visual[a]?.id),nb=nodes.get(visual[b]?.id);if(na&&nb){if(!previewSwap)await Promise.all([tween(na,pos(b),110),tween(nb,pos(a),110)]);await Promise.all([tween(na,pos(a),150),tween(nb,pos(b),150)]);}return;}
   persist();state.balance=serverMode?result.state.balance:before.balance-(before.bonus?0:before.bet*({base:1,luck:2,enhanced:50,mayhem:1000}[before.mode]));if(auto&&!before.bonus)auto--;hud();
-  for(const e of result.events){if(e.type==='swap'){const swapA=e.a??a,swapB=e.b??b;if(!swishPlayed)sound.play('swap');if(state.bonus)state.bonus.moves=e.moves;hud();let na=nodes.get(visual[swapA]?.id),nb=nodes.get(visual[swapB]?.id);if(!previewSwap)await Promise.all([tween(na,pos(swapB),165),tween(nb,pos(swapA),165)]);visual=clone(e.board);nodes.get(visual[swapA].id).index=swapA;nodes.get(visual[swapB].id).index=swapB;}
+  for(const e of result.events){if(e.type==='properties'){draw(e.board);}if(e.type==='progress'){if(e.mult>displayMult)sound.play('multiplier');displayMult=e.mult;state.meter=e.meter;hud();}if(e.type==='swap'){const swapA=e.a??a,swapB=e.b??b;if(!swishPlayed)sound.play('swap');if(state.bonus&&Number.isInteger(e.moves))state.bonus.moves=e.moves;hud();let na=nodes.get(visual[swapA]?.id),nb=nodes.get(visual[swapB]?.id);if(!previewSwap)await Promise.all([tween(na,pos(swapB),165),tween(nb,pos(swapA),165)]);visual=clone(e.board);nodes.get(visual[swapA].id).index=swapA;nodes.get(visual[swapB].id).index=swapB;}
    if(e.type==='destroy'){const cells=[...e.cells,...e.ice];cells.forEach(cellGlow);await Promise.all(e.effects.map(effect));sound.cascade=Math.max(0,e.step);sound.play('pop',sound.cascade);
     // Anticipation: 50% scale, whitening and halo together; then a fast rebound.
     await Promise.all(cells.map(async i=>{const n=nodes.get(visual[i]?.id);if(!n)return;n.white={v:0};n.whiteFilter=new PIXI.ColorMatrixFilter();n.whiteBlur=new PIXI.BlurFilter({strength:0,quality:4});n.sprite.filters=[n.whiteFilter,n.whiteBlur];const halo=symbolGlow(n,0xffffff,0);await Promise.all([tween(n.scale,{x:.5,y:.5},270,t=>t*t),tween(n.white,{v:1},270),tween(halo,{alpha:.55},270)]);await tween(n.scale,{x:.64,y:.64},110,t=>1-(1-t)**2);}));
     if(e.ice.length)sound.play('ice');else if(e.damage.length)sound.play('iceHit');
-    await Promise.all(cells.map(async i=>{const c=visual[i],n=nodes.get(c?.id);if(!n)return;popFlash(i);burst(i,c.kind==='ice'?0xb7edff:palette[c.color],c.kind==='ice'?36:32);if(c.magic&&!serverMode){sound.play('magic');float(state.bonus?'+1 MOVE':'★',i);if(!state.bonus)state.meter=Math.min(3,state.meter+1);}if(c.mult)float('×'+c.mult,i);return Promise.all([tween(n.scale,{x:.02,y:.02},115,t=>t*t),tween(n,{alpha:0},115)]);}));
+    await Promise.all(cells.map(async i=>{const c=visual[i],n=nodes.get(c?.id);if(!n)return;popFlash(i);burst(i,c.kind==='ice'?0xb7edff:palette[c.color],c.kind==='ice'?36:32);if(c.magic&&(!serverMode||e.magicCells?.includes(i))){sound.play('magic');float(serverMode?'★':state.bonus?'+1 MOVE':'★',i);if(!serverMode&&!state.bonus)state.meter=Math.min(3,state.meter+1);}if(c.mult&&(!serverMode||e.collected?.includes(i)))float('×'+c.mult,i);return Promise.all([tween(n.scale,{x:.02,y:.02},115,t=>t*t),tween(n,{alpha:0},115)]);}));
     for(const i of cells){const id=visual[i]?.id,n=nodes.get(id);if(n){n.destroy({children:true});nodes.delete(id);}visual[i]=null;}
     for(const i of e.damage)if(!e.ice.includes(i)){const old=nodes.get(visual[i]?.id);if(old){old.destroy({children:true});nodes.delete(visual[i].id);}let c=e.board[i],n=make(c);n.index=i;Object.assign(n,pos(i));burst(i,0xb7edff,14);tween(n.scale,{x:1.08,y:.93},65).then(()=>tween(n.scale,{x:1,y:1},140));visual[i]=clone(c);}
     for(const id of e.armed){const n=nodes.get(id);if(n){if(!n.armedGlow)n.armedGlow=symbolGlow(n,0xffdc86,.85);float('✦',n.index);}}
-    if(e.mult>displayMult)sound.play('multiplier');displayWin=e.win;displayMult=e.mult;if(state.bonus)state.bonus.moves=e.moves;hud();if(e.step>=2){$('#message').textContent=['SWEET CASCADE!','GREAT CHAIN!','SWEET CASCADE!'][Math.min(2,Math.floor(e.step/3))];$('#message').style.opacity=1;}await pause(90);
+    if(serverMode&&Number.isInteger(e.meter))state.meter=e.meter;if(e.mult>displayMult)sound.play('multiplier');displayWin=e.win;displayMult=e.mult;if(state.bonus&&Number.isInteger(e.moves))state.bonus.moves=e.moves;hud();if(e.step>=2){$('#message').textContent=['SWEET CASCADE!','GREAT CHAIN!','SWEET CASCADE!'][Math.min(2,Math.floor(e.step/3))];$('#message').style.opacity=1;}await pause(90);
    }if(e.type==='fall')await fall(e.board);if(e.type==='shuffle')await shuffleBoard(e.board);
   }
-  state=result.state;displayWin=result.win;draw(state.board);hud();if(result.bonusStarted){sound.play('bonus');modal('<h2>FROSTED FACTORY</h2><p>5 free moves. Break the ice and collect multipliers. Magic candies award extra moves.</p><button class="modal-action" id="continue">START BONUS</button>');$('#continue').onclick=()=>{sound.play('transition');close();};displayWin=0;displayMult=1;}
+  state=result.state;displayWin=result.win;if(result.freeRoundsCompleted)stop();if(serverMode){displayMult=state.mult??1;if(state.bonus?.awaitingCompletion||state.serverWarning)stop();}draw(state.board);hud();if(result.bonusStarted){sound.play('bonus');modal('<h2>FROSTED FACTORY</h2><p>'+state.bonus.moves+' free moves. Break the ice and collect multipliers.</p><button class="modal-action" id="continue">START BONUS</button>');$('#continue').onclick=()=>{sound.play('transition');close();};displayWin=0;displayMult=1;}
+  else if(serverMode&&state.bonus?.awaitingCompletion){modal('<h2>BONUS REVIEW PAUSED</h2><p>All reported moves are used. The return to the base game is awaiting server verification. No further move will be sent.</p><button class="modal-action" id="continue">OK</button>');$('#continue').onclick=close;}
   else if(result.bonusEnded){sound.celebrate(result.win/(before.bonus?.bet||state.bet));modal('<h2>BONUS COMPLETE</h2><p>Total win</p><h1>'+money(result.win)+'</h1><button class="modal-action" id="continue">CONTINUE</button>');$('#continue').onclick=()=>{sound.play('winEnd');close();};}
+  else if(result.freeRoundsCompleted){const award=result.freeRoundsCompleted;modal('<h2>FREE MOVES COMPLETE</h2><p>'+(award.completeTotal?'TOTAL WON':'WON SINCE RELOAD')+'</p><h1>'+money(award.knownWin)+'</h1><button class="modal-action" id="continue">CONTINUE</button>');$('#continue').onclick=close;}
   else if(result.win>=state.bet*15){sound.celebrate(result.win/state.bet);float('+'+money(result.win),24);await pause(450);}
- }catch(e){stop();if(serverMode){rgs.fail(e.message,true);showConnectionFault();}else{console.error(e);toast(e.message);}}finally{busy=false;state=rgs.snapshot();hud();if((held||auto>0)&&(!serverMode||rgs.playable)&&!$('#dialog').open&&!document.hidden)setTimeout(()=>play(),220/speed);}
+ }catch(e){stop();if(serverMode){rgs.fail(e.message,true);showConnectionFault();}else{console.error(e);toast(e.message);}}finally{busy=false;roundRunning=false;fastRequested=false;updateSpeed();state=rgs.snapshot();hud();if(auto>0&&(!serverMode||rgs.playable)&&!$('#dialog').open&&!document.hidden)autoTimer=setTimeout(()=>{if(auto>0&&!document.hidden&&!$('#dialog').open)play();},220/speed);}
 }
-$('#play').onclick=()=>play();$('#sound').onclick=()=>{sound.unlock();sound.enabled=!sound.enabled;$('#sound').style.opacity=sound.enabled?1:.45;};$('#turbo').onclick=()=>{speed=speed===1?1.8:1;$('#turbo').classList.toggle('active',speed!==1);sound.play('click');};
-const bets=[.1,.2,.5,1,2,5,10,20,50,100];async function changeBet(dir){if(busy||state.bonus||(serverMode&&!rgs.playable))return;const options=serverMode?rgs.bets:bets;let i=options.indexOf(state.bet),value=options[Math.max(0,Math.min(options.length-1,i+dir))];if(value===state.bet)return;busy=true;hud();try{if(serverMode)await rgs.setBet(value);else rgs.s.bet=value;state=rgs.snapshot();persist();sound.play('click');}catch(e){if(serverMode)showConnectionFault();else toast(e.message);}finally{busy=false;hud();}}$('#minus').onclick=()=>changeBet(-1);$('#plus').onclick=()=>changeBet(1);
+$('#sound').onclick=()=>{sound.unlock();sound.enabled=!sound.enabled;$('#sound').style.opacity=sound.enabled?1:.45;};$('#turbo').onclick=()=>{persistentTurbo=!persistentTurbo;updateSpeed();$('#turbo').classList.toggle('active',persistentTurbo);sound.play('click');};
+const bets=[.1,.2,.5,1,2,5,10,20,50,100];async function changeBet(dir){if(busy||state.bonus||state.freeRounds||(serverMode&&!rgs.playable))return;const options=serverMode?rgs.bets:bets;let i=options.indexOf(state.bet),value=options[Math.max(0,Math.min(options.length-1,i+dir))];if(value===state.bet)return;busy=true;hud();try{if(serverMode)await rgs.setBet(value);else rgs.s.bet=value;state=rgs.snapshot();persist();sound.play('click');}catch(e){if(serverMode)showConnectionFault();else toast(e.message);}finally{busy=false;hud();}}$('#minus').onclick=()=>changeBet(-1);$('#plus').onclick=()=>changeBet(1);
 $('#bonus').onclick=()=>{if(serverMode||busy||state.bonus)return;modal('<h2>CHOOSE A MODE</h2><div class="cards">'+[['base','Normal play','1× per move'],['luck','Extra Luck','2× per move · more magic candies'],['enhanced','Enhanced Moves','50× per move · bombs, rockets and multipliers'],['ice','Frosted Factory','100× · buy 5 free moves'],['mayhem','Multi Mayhem','1000× per move · multiplier board']].map(([id,name,desc])=>`<button class="card" data-mode="${id}"><b>${name}</b><span>${desc}</span><span>${money(state.bet*({base:1,luck:2,enhanced:50,ice:100,mayhem:1000}[id]))} credits</span></button>`).join('')+'</div>');document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{const mode=b.dataset.mode;$('#dialog-content').innerHTML='<h2>'+b.querySelector('b').textContent+'</h2><p>'+ (mode==='ice'?'Cost: '+money(state.bet*100)+' demo credits.':'Changing mode is free. Your next move uses the selected price.')+'</p><button id="confirm" class="modal-action">CONFIRM</button>';$('#confirm').onclick=()=>{try{state=mode==='ice'?rgs.buy():rgs.mode(mode);persist();displayWin=0;displayMult=1;draw(state.board);hud();close();sound.play(mode==='ice'?'bonus':'click');}catch(e){toast(e.message);}};});};
 $('#auto').onclick=()=>{if(serverMode&&!rgs.playable)return;if(auto){stop();return;}modal('<h2>AUTOPLAY</h2><p>Choose the number of paid moves. Stopping autoplay lets the current move finish.</p><div class="choices">'+[5,10,25,50,100,250,500,1000].map(n=>`<button data-count="${n}">${n}</button>`).join('')+'</div>');document.querySelectorAll('[data-count]').forEach(b=>b.onclick=()=>{auto=Number(b.dataset.count);close();hud();if(!busy)play();});};
 $('#settings').onclick=()=>{modal('<h2>SETTINGS</h2><label><input id="sfx-check" type="checkbox" '+(sound.enabled?'checked':'')+'> Sound effects</label><label><input id="music-check" type="checkbox" '+(sound.music?'checked':'')+'> Background music</label><p>'+(serverMode?'Reload starts a new RGS test session.':'Your board and bonus progress are saved in this browser.')+'</p>');$('#sfx-check').onchange=e=>{sound.unlock();sound.enabled=e.target.checked;};$('#music-check').onchange=e=>{sound.unlock();sound.music=e.target.checked;};};
-$('#history').onclick=()=>modal('<h2>MOVE HISTORY</h2><table><tr><th>Time</th><th>Cost</th><th>Win</th><th>Multiplier</th></tr>'+state.history.slice(0,20).map(h=>`<tr><td>${new Date(h.time).toLocaleTimeString('en-US')}</td><td>${h.bonus?'Bonus':money(h.cost)}</td><td>${money(h.win)}</td><td>×${h.mult}</td></tr>`).join('')+'</table>');
-$('#rules').onclick=()=>serverMode?modal('<h2>SWEET CASCADE · RGS TEST</h2><p>Swap adjacent symbols. Press Play or Space to use a move suggested by the server. Cascades, wins and your balance come from the test RGS.</p><p>Bonuses and extra bet modes are not available in this server version. Test payouts are still being developed.</p><p>Reload starts a fresh test session. After a connection failure, the last move is never submitted again automatically.</p>'):modal('<h2>SWEET CASCADE</h2><p>Swap adjacent candies to match 3 or more. You can also move a rocket or bomb. Invalid swaps return without charging credits.</p><p>A line of 4 clears a row or column. A line of 5 or more clears that color. Intersections clear their bounding rectangle. Rockets fire in the arrow direction; bombs clear a 3×3 area.</p><p>Every 3 candies destroyed in a cascade step count as one chain. Demo payout: bet × 0.05 × max(chains × multiplier sum − 1, 0). A single match of 3 with no continuation pays nothing.</p><p>Collect 3 magic candies to trigger the ice bonus. Wins and multipliers accumulate during the bonus. Each destroyed magic candy adds one move.</p><p>Press Space for an automatic move; hold to repeat. The board persists between moves and after reloading.</p><p>This client demo uses test generation, no real money and no declared RTP. Final mathematics and unresolved edge cases require the production RGS.</p>');
-window.addEventListener('keydown',e=>{if(e.code==='Escape'){stop();return;}if(e.code!=='Space'||/INPUT|TEXTAREA|SELECT|BUTTON/.test(e.target.tagName)||$('#dialog').open)return;e.preventDefault();if(e.repeat)return;held=true;if(!busy)play();});window.addEventListener('keyup',e=>{if(e.code==='Space')held=false;});window.addEventListener('blur',()=>{held=false;cancelDrag();});document.addEventListener('visibilitychange',()=>{if(document.hidden){stop();cancelDrag();}});
+$('#history').onclick=()=>modal('<h2>MOVE HISTORY</h2><table><tr><th>Time</th><th>Cost</th><th>Win</th><th>Multiplier</th></tr>'+state.history.slice(0,20).map(h=>`<tr><td>${new Date(h.time).toLocaleTimeString('en-US')}</td><td>${h.bonus?'Bonus · ':''}${money(h.cost)}</td><td>${money(h.win)}</td><td>×${h.mult}</td></tr>`).join('')+'</table>');
+$('#rules').onclick=()=>serverMode?modal('<h2>SWEET CASCADE · RGS TEST</h2><p>Swap adjacent symbols. Press Play or Space to use a move suggested by the server. Cascades, wins and your balance come from the test RGS.</p><p>Magic collection, symbol multipliers, ice damage and ice breaking are connected. The test session pauses after the last bonus move while the return to normal play is being verified. Extra bet modes and bonus purchases are unavailable.</p><p>Reload starts a fresh test session. After a connection failure, the last move is never submitted again automatically.</p>'):modal('<h2>SWEET CASCADE</h2><p>Swap adjacent candies to match 3 or more. You can also move a rocket or bomb. Invalid swaps return without charging credits.</p><p>A line of 4 clears a row or column. A line of 5 or more clears that color. Intersections clear their bounding rectangle. Rockets fire in the arrow direction; bombs clear a 3×3 area.</p><p>Every 3 candies destroyed in a cascade step count as one chain. Demo payout: bet × 0.05 × max(chains × multiplier sum − 1, 0). A single match of 3 with no continuation pays nothing.</p><p>Collect 3 magic candies to trigger the ice bonus. Wins and multipliers accumulate during the bonus. Each destroyed magic candy adds one move.</p><p>Press Space for an automatic move; hold to repeat. The board persists between moves and after reloading.</p><p>This client demo uses test generation, no real money and no declared RTP. Final mathematics and unresolved edge cases require the production RGS.</p>');
+window.addEventListener('keydown',e=>{if(e.code==='Escape')stop();});
 app.ticker.add(t=>{let dt=Math.min(t.deltaMS,50);swipeHint.tick(dt,!busy&&!pointer&&!held&&!auto&&!document.hidden&&!$('#dialog').open&&state.board.length===49&&(!serverMode||rgs.playable),()=>serverMode?rgs.moves():moves(state.board));const hoverActive=hoveredCell!==null&&!busy&&!pointer;hoverOpacity+=(Number(hoverActive)-hoverOpacity)*Math.min(1,dt/110);if(hoverActive)Object.assign(hoverCell,pos(hoveredCell));hoverCell.alpha=hoverOpacity*(.17+.045*Math.sin(performance.now()*.0032));for(let i=anims.length-1;i>=0;i--){const a=anims[i];a.t+=dt;let p=Math.min(a.t/a.ms,1),e=a.ease(p);if(!a.obj.destroyed)for(const k in a.to)a.obj[k]=a.from[k]+(a.to[k]-a.from[k])*e;if(p===1){anims.splice(i,1);a.resolve();}}for(let i=particles.length-1;i>=0;i--){const p=particles[i];p.life-=dt/1000;p.g.x+=p.vx*dt/1000;p.g.y+=p.vy*dt/1000;p.vy+=460*dt/1000;p.g.alpha=Math.max(0,p.life/p.total);p.g.rotation+=dt*.003;if(p.life<=0){p.g.destroy();particles.splice(i,1);}}for(const n of nodes.values()){if(n.whiteFilter){const v=n.white.v,k=1-v;n.whiteBlur.strength=.8*v;n.whiteFilter.matrix=[k,0,0,0,v,0,k,0,0,v,0,0,k,0,v,0,0,0,1,0];}if(['candy','bomb','rocket'].includes(n.kind)){const phase=performance.now()*.0019*n.idleRate+n.phase;const amp=1;const emphasis=selected===n.index?1.045:1;n.sprite.y=Math.sin(phase)*2.1*amp;n.sprite.rotation=n.baseSpriteRotation+Math.sin(phase*.79)*.016*amp;n.sprite.scale.set(n.baseSpriteScale*emphasis*(1+Math.sin(phase*1.17)*.016*amp),n.baseSpriteScaleY*emphasis*(1-Math.sin(phase*1.17)*.016*amp));if(n.multiplierLabel){const b=n.multiplierLabel;b.position.copyFrom(n.sprite.position);b.rotation=n.sprite.rotation-n.baseSpriteRotation;b.scale.set(n.sprite.scale.x/n.baseSpriteScale,n.sprite.scale.y/n.baseSpriteScaleY);}}for(const g of n.glows||[]){g.position.copyFrom(n.sprite.position);g.rotation=n.sprite.rotation;g.scale.set(n.sprite.scale.x*g.glowSpread,n.sprite.scale.y*g.glowSpread);}}});
 
 function showConnectionFault(){
  if(!serverMode||!rgs.transport.fault)return;stop();cancelDrag();$('#game').inert=true;if($('#dialog').open)close();
  if(document.hidden)return;
  const panel=$('#rgs-status');panel.hidden=false;panel.querySelector('h2').textContent='CONNECTION STOPPED';
- panel.querySelector('p').textContent=rgs.transport.unknownOutcome?'The last move could not be confirmed or displayed. It will not be sent again. Reload starts a new test session.':rgs.transport.fault+' Reload starts a new test session.';
+ panel.querySelector('p').textContent=rgs.transport.fault+' '+(rgs.transport.unknownOutcome?'The last move could not be confirmed or displayed. It will not be sent again. ':'')+'Reload starts a new test session.';
  panel.querySelector('button').hidden=false;panel.querySelector('button').focus();
 }
 $('#rgs-reload').onclick=()=>location.reload();
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)showConnectionFault();});
 window.addEventListener('pageshow',()=>showConnectionFault());
-draw(state.board);hud();persist();window.sweetCascade={rgs,play,get state(){return clone(state);},get busy(){return busy;},get hint(){return {visible:swipeHint.layer.visible,pair:swipeHint.pair,elapsed:swipeHint.elapsed};},app};
+draw(state.board);hud();persist();window.sweetCascade={rgs,play,get ready(){return startupComplete;},get audio(){return {unavailable:[...sound.unavailable],musicPlaying:!!sound.musicLoop?.source,musicVolume:sound.musicGain?.gain.value};},get state(){return clone(state);},get busy(){return busy;},get hint(){return {visible:swipeHint.layer.visible,pair:swipeHint.pair,elapsed:swipeHint.elapsed};},app};
 // Reproducible visual QA is opt-in and never changes the normal game session.
 if(new URLSearchParams(location.search).has('qa')){const qa=document.createElement('button');qa.textContent='VFX TEST';qa.style.cssText='position:fixed;bottom:50px;left:10px;z-index:5;background:#172944;padding:10px;border-radius:8px';document.body.append(qa);qa.onclick=async()=>{if(busy)return;busy=true;try{await effect({kind:'bomb',i:24});burst(24,0xffd65a,40);await pause(500);await effect({kind:'rocket',i:38,dir:0});await pause(500);await shuffleBoard(state.board);}finally{busy=false;}};}
 
-if(serverMode){try{state=await rgs.initialize();draw(state.board);busy=false;swipeHint.reset(1400);hud();$('#rgs-status').hidden=true;$('#game').inert=false;}catch{busy=false;hud();showConnectionFault();}}else{$('#rgs-status').hidden=true;$('#game').inert=false;}
+const initialized=await sessionReady;if(initialized.error)throw initialized.error;state=initialized.value;draw(state.board);hud();
+await prepareTask('frame',async()=>{await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));app.render();});
+$('#rgs-status').hidden=true;
+await revealGame(()=>!serverMode||rgs.playable);startupComplete=true;busy=false;swipeHint.reset(1400);hud();
+if(sound.unavailable.length){toast('Some audio could not load. You can continue playing.');for(const failure of sound.audioLoader?.failures||[])rgs.transport?.log('audio-'+failure.file,'Audio '+failure.file+': '+failure.attempts.map(a=>a.format+' '+a.error).join('; ')+'. Unavailable; game playable without this sound.');}
+for(const recovery of sound.audioLoader?.recoveries||[])rgs.transport?.log('audio-'+recovery.file,'Audio '+recovery.file+': '+recovery.attempts.map(a=>a.format+' '+a.error).join('; ')+'. MP3 decoded successfully.');
+if(state.freeRounds?.counter===0){modal('<h2>FREE MOVES</h2><p>'+state.freeRounds.remaining+' free moves at '+money(state.freeRounds.bet)+' '+(state.currency||'credits')+'</p><button class="modal-action" id="continue">CONTINUE</button>');$('#continue').onclick=close;}
 
+
+
+}
+
+try{await startGame();}catch(error){failStartup('The game could not finish loading. Please reload.');console.error('Startup blocked:',error?.message);}
 
