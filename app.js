@@ -1220,10 +1220,67 @@ class ServerRGS {
   this.transport=transport||new RgsTransport({...RGS_TEST_CONFIG,onFault:(...args)=>{this.ready=false;onFault(...args);}});
   this.s={board:[],balance:0,bet:0,mode:'base',bonus:null,freeRounds:null,meter:0,mult:1,history:[],version:0};this.helpers=[];this.bets=[];
  }
- get playable(){return this.ready&&this.transport.healthy&&!this.transport.pending&&!this.s.pendingBonus&&!this.s.bonus?.awaitingCompletion&&!this.s.awaitingMoves;}
+ get playable(){return this.ready&&this.transport.healthy&&!this.transport.pending&&!this.featurePending&&!this.s.pendingBonus&&!this.s.bonus?.awaitingCompletion&&!this.s.awaitingMoves;}
  snapshot(){return structuredClone(this.s);}
- cost(){return this.s.bonus||this.s.freeRounds?0:this.s.bet;}
+ cost(){return this.s.bonus||this.s.freeRounds?0:(this.modeOffer(this.s.mode)?.cost??this.s.bet);}
  moves(){return this.helpers.map(p=>[...p]);}
+ modeOffer(value){
+  const mode=value==='base'?'main':value;
+  if(!['main','luck','enhanced'].includes(mode))return null;
+  const multiplier=this.config?.mode_list?.[mode]?.bet_multiplier;
+  return Number.isFinite(multiplier)&&multiplier>0?{mode:mode==='main'?'base':mode,serverMode:mode,multiplier,cost:this.s.bet*multiplier}:null;
+ }
+ async mode(value){
+  const offer=this.modeOffer(value);
+  if(!this.playable)throw Error('Session is not ready.');
+  if(!offer)throw Error('This mode is not available.');
+  if(this.s.bonus||this.s.freeRounds)throw Error('Finish the current free moves first.');
+  if(offer.mode===this.s.mode)return this.snapshot();
+  if(this.s.balance<offer.cost)throw Error('Insufficient balance.');
+  this.featurePending=true;
+  try{
+   const options=await this.transport.request({set:'options',mode:offer.serverMode,ctx:this.ctx});
+   if(options.options?.bet_sum!==this.s.bet||this.wallet(options).balance!==this.s.balance)throw Error('Invalid mode selection response.');
+   // The emulator's mode flag invalidates the previous matrix. A distinct,
+   // explicitly priced entry creates its new board; never send an old swap or
+   // a supposedly free reset here. The server charges even action:reset.
+   const reply=await this.transport.request({set:'bet',ctx:options.ctx||this.ctx}),bet=reply.bet,wallet=this.wallet(reply);
+   const unit=10**(this.s.decimals??2),same=(a,b)=>Number.isFinite(a)&&Math.round(a*unit)===Math.round(b*unit);
+   if(typeof bet?.ctx!=='string'||!bet.ctx||bet.bet_sum!==this.s.bet||bet.freespin||bet.bonus||!same(bet.total?.bet,offer.cost)||(bet.total?.win??0)!==0||!same(wallet.balance,this.s.balance-offer.cost)||!Array.isArray(bet.events)||bet.events.some(e=>e.type!=='helper'))throw Error('Server did not confirm the new mode board.');
+   const board=this.adapter.initial(bet.reels),helpers=rgsHelpers(bet.events,board);
+   if(!helpers.length||board.some(c=>c.kind==='ice'))throw Error('Invalid mode entry board.');
+   this.ctx=bet.ctx;this.helpers=helpers;
+   this.s={...this.s,mode:offer.mode,board,balance:wallet.balance,version:this.s.version+1,meter:0,mult:1,lastCost:bet.total.bet,awaitingMoves:false,serverWarning:null,
+    history:[{time:Date.now(),cost:bet.total.bet,win:0,mult:1,mode:offer.mode,modeEntry:true},...this.s.history].slice(0,100)};
+   return this.snapshot();
+  }catch(e){this.fail(e.message,true);throw e;}finally{this.featurePending=false;}
+ }
+ iceOffer(){
+  const offer=this.config?.buy_feature?.ice;
+  return offer&&Number.isFinite(offer.bet_multiplier)&&offer.bet_multiplier>0&&Number.isSafeInteger(offer.free_spins)&&offer.free_spins>0?{multiplier:offer.bet_multiplier,moves:offer.free_spins,cost:this.s.bet*offer.bet_multiplier}:null;
+ }
+ async buy(){
+  const offer=this.iceOffer();
+  if(!this.playable||this.featurePending)throw Error('Session is not ready.');
+  if(!offer)throw Error('Ice bonus purchase is not available.');
+  if(this.s.mode!=='base')throw Error('Return to Normal play to buy the ice bonus.');
+  if(this.s.bonus||this.s.freeRounds)throw Error('Finish the current free moves first.');
+  if(this.s.balance<offer.cost)throw Error('Insufficient balance.');
+  this.featurePending=true;
+  try{
+   const reply=await this.transport.request({set:'bet',buy_bonus:'ice',ctx:this.ctx}),bet=reply.bet,wallet=this.wallet(reply);
+   const bonus=rgsFreeSpin(bet?.freespin),unit=10**(this.s.decimals??2),same=(a,b)=>Number.isFinite(a)&&Math.round(a*unit)===Math.round(b*unit);
+   if(typeof bet?.ctx!=='string'||!bet.ctx||bet.bet_sum!==this.s.bet||!bonus||bonus.counter!==0||bonus.limit!==offer.moves||bet.bonus||!same(bet.total?.bet,offer.cost)||(bet.total?.win??0)!==0||!same(wallet.balance,this.s.balance-offer.cost)||!Array.isArray(bet.events)||bet.events.some(e=>e.type!=='helper'))throw Error('Server did not confirm the ice purchase.');
+   const board=this.adapter.initial(bet.reels),helpers=rgsHelpers(bet.events,board);
+   if(!helpers.length||board.some((c,i)=>(c.kind==='ice')!==(i>=35))||board.some(c=>c.kind==='ice'&&c.hp!==2))throw Error('Invalid purchased ice board.');
+   const base=structuredClone(this.s.board),baseHelpers=this.moves();
+   this.ctx=bet.ctx;this.helpers=helpers;
+   this.s={...this.s,board,balance:wallet.balance,version:this.s.version+1,mult:1,lastCost:bet.total.bet,awaitingMoves:false,pendingBonus:null,serverWarning:null,
+    bonus:{...bonus,base,baseHelpers,bet:this.s.bet,mult:1,lastMoveWin:0,awaitingCompletion:false},
+    history:[{time:Date.now(),cost:bet.total.bet,win:0,mult:1,bonus:true,purchase:'ice'},...this.s.history].slice(0,100)};
+   return this.snapshot();
+  }catch(e){this.fail(e.message,true);throw e;}finally{this.featurePending=false;}
+ }
  fail(message,unknown=false){const known=['Invalid free rounds stake.','Invalid free rounds counter.','Invalid free rounds quantity.','Free rounds progress is inconsistent.','Awarded moves need an initial board context from RGS. Reset was not sent.','Award restoration requires a confirmed settled board.','Missing initial game context or bet.','Unexpected game configuration.'];if(known.includes(message))this.transport.log?.('rgs-validation',message+' Play blocked; request not repeated.');this.ready=false;this.transport.unknownOutcome||=unknown;this.transport.fail(message);}
  wallet(reply){const wallet=reply.wallet;if(!wallet||!Number.isFinite(wallet.balance)||wallet.balance<0)throw Error('Invalid server wallet.');if(wallet.currency!==undefined&&!/^[A-Z0-9]{2,8}$/.test(wallet.currency))throw Error('Invalid wallet currency.');if(wallet.decimals!==undefined&&(!Number.isInteger(wallet.decimals)||wallet.decimals<0||wallet.decimals>8))throw Error('Invalid wallet decimals.');return wallet;}
  async initialize(){
@@ -1259,6 +1316,7 @@ class ServerRGS {
  }
  async setBet(value){
   if(!this.playable)throw Error('Session is not ready.');if(this.s.bonus||this.s.freeRounds)throw Error('The stake is locked during free moves.');if(!this.bets.includes(value))throw Error('Unsupported bet.');
+  if(this.s.mode!=='base')throw Error('Return to Normal play to change the base bet.');
   try{
    const reply=await this.transport.request({set:'options',bet_sum:value,ctx:this.ctx});
    if(reply.options?.bet_sum!==value)throw Error('Server did not confirm the selected bet.');
@@ -1356,6 +1414,7 @@ class ServerRGS {
   }catch(e){this.fail(e.message,sent);throw e;}
  }
 }
+
 
 // Presentation only: receives legal pairs, never queries RGS or moves pieces.
 class SwipeHint {
@@ -2271,7 +2330,7 @@ function float(text,i,color='#ffffff'){const isMultiplier=text.startsWith('×'),
 async function shuffleBoard(board){sound.play('shuffle');float('SHUFFLE',24);const moving=()=>[...nodes.values()].filter(n=>n.kind!=='ice');await Promise.all(moving().map(n=>Promise.all([tween(n,{x:350,y:350,rotation:Math.PI,alpha:0},400),tween(n.scale,{x:.1,y:.1},400)])));draw(board);for(const n of moving()){n.rotation=0;n.scale.set(.1);n.alpha=0;}await Promise.all(moving().map(n=>Promise.all([tween(n.scale,{x:1,y:1},300),tween(n,{alpha:1},250)])));}
 async function effect(e){return e.kind==='donut'?donutVFX.play({...e,tint:palette[e.color]??palette[0]}):boosterVFX.play(e);}
 function updateConnectionIndicator(){const status=serverMode&&rgs.transport.healthy&&rgs.sessionEnvironment?rgs.sessionEnvironment:'offline';const dot=$('#connection');dot.dataset.status=status;dot.title=dot.ariaLabel=({production:'Production RGS connected',test:'Test RGS connected',offline:'No RGS connection'})[status];}
-function hud(winGain){const gain=winGain??Math.max(0,displayWin-lastHudWin);lastHudWin=displayWin;if(gain>0)bounceWin(gain);updateConnectionIndicator();const b=state.bonus,award=state.freeRounds;$('#balance').textContent=money(state.balance);$('#bet').textContent=money(state.bet);$('#win').textContent=money(displayWin);$('#mult-value').textContent='×'+displayMult;$('#win-label').textContent=b?'BONUS WIN':'WIN';$('#meter-title').textContent=b?'MOVES LEFT: '+b.moves:'ICE BONUS';$('#moves-label').textContent=b?'Magic candy = +1 move':'Collect 3 magic candies';$('#bonus-progress').hidden=!!(b||award);const collected=Math.max(0,Math.min(3,Number(state.meter)||0));$('#meter-fill').style.width=(collected/3*100)+'%';$('#meter').setAttribute('aria-valuenow',String(collected));$('#meter-count').textContent=collected+' / 3';$('#game').classList.toggle('bonus-active',!!b);for(const id of ['minus','plus','bonus'])$('#'+id).disabled=busy||!!b;if(serverMode){for(const id of ['minus','plus','auto'])$('#'+id).disabled=busy||!rgs.playable||(id!=='auto'&&!!(b||award));$('#bonus').disabled=true;$('#bonus').title='Not available in this RGS version';$('#mult').style.visibility='visible';if(b||award){$('#win-label').textContent='LAST MOVE WIN';}}if(award){$('#meter-title').textContent='FREE MOVES: '+award.remaining+(b?' · ICE: '+b.moves:'');$('#moves-label').textContent=(award.completeTotal?'TOTAL WON ':'WON SINCE RELOAD ')+(state.currency?state.currency+' ':'')+money(award.knownWin);$('#minus').disabled=$('#plus').disabled=true;}$('#bet-open').disabled=busy||!!(b||award)||(serverMode&&!rgs.playable);$('#bet-open').setAttribute('aria-label','Choose bet, current '+money(state.bet));$('#auto').classList.toggle('active',auto>0);$('#auto').setAttribute('aria-pressed',String(auto>0));$('#auto').title=auto?'Remaining: '+auto:'Autoplay';}
+function hud(winGain){const gain=winGain??Math.max(0,displayWin-lastHudWin);lastHudWin=displayWin;if(gain>0)bounceWin(gain);updateConnectionIndicator();const b=state.bonus,award=state.freeRounds;$('#balance').textContent=money(state.balance);$('#bet').textContent=money(serverMode&&!b&&!award?rgs.cost():state.bet);$('#bet-label').textContent=serverMode&&state.mode!=='base'?'BET ×'+rgs.modeOffer(state.mode).multiplier:'BET';$('#win').textContent=money(displayWin);$('#mult-value').textContent='×'+displayMult;$('#win-label').textContent=b?'BONUS WIN':'WIN';$('#meter-title').textContent=b?'MOVES LEFT: '+b.moves:'ICE BONUS';$('#moves-label').textContent=b?'Magic candy = +1 move':'Collect 3 magic candies';$('#bonus-progress').hidden=!!(b||award);const collected=Math.max(0,Math.min(3,Number(state.meter)||0));$('#meter-fill').style.width=(collected/3*100)+'%';$('#meter').setAttribute('aria-valuenow',String(collected));$('#meter-count').textContent=collected+' / 3';$('#game').classList.toggle('bonus-active',!!b);for(const id of ['minus','plus','bonus'])$('#'+id).disabled=busy||!!b;if(serverMode){for(const id of ['minus','plus','auto'])$('#'+id).disabled=busy||!rgs.playable||(id!=='auto'&&(!!(b||award)||state.mode!=='base'));$('#bonus').disabled=busy||!rgs.playable||!!(b||award)||!(rgs.iceOffer()||rgs.modeOffer('luck')||rgs.modeOffer('enhanced'));$('#bonus').title=rgs.iceOffer()?'Buy ice bonus':'Not available in this RGS version';$('#mult').style.visibility='visible';if(b||award){$('#win-label').textContent='LAST MOVE WIN';}}if(award){$('#meter-title').textContent='FREE MOVES: '+award.remaining+(b?' · ICE: '+b.moves:'');$('#moves-label').textContent=(award.completeTotal?'TOTAL WON ':'WON SINCE RELOAD ')+(state.currency?state.currency+' ':'')+money(award.knownWin);$('#minus').disabled=$('#plus').disabled=true;}$('#bet-open').disabled=busy||!!(b||award)||(serverMode&&(!rgs.playable||state.mode!=='base'));$('#bet-open').setAttribute('aria-label','Choose base bet, current '+money(state.bet));$('#bet-open').title=serverMode&&state.mode!=='base'?'Return to Normal play to change the base bet.':'';$('#auto').classList.toggle('active',auto>0);$('#auto').setAttribute('aria-pressed',String(auto>0));$('#auto').title=auto?'Remaining: '+auto:'Autoplay';}
 function persist(){if(serverMode||visualPreview)return;localStorage.setItem(KEY,JSON.stringify(rgs.snapshot()));}
 let toastTimer;function toast(t){$('#toast').textContent=t;$('#toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),3000);}
 function updateSpeed(){speed=persistentTurbo||held||fastRequested?1.8:1;}
@@ -2339,7 +2398,7 @@ async function play(a,b,swishPlayed=false){if(orientationBlocked()||!startupComp
   await Promise.all(collectionFlights);
   // Present only settled paid wins or the confirmed bonus total, never cumulative bonus moves.
   const completedAward=result.freeRoundsCompleted,confirmedAwardTotal=completedAward?.completeTotal&&Number.isFinite(completedAward.knownWin);
-  if(!completedAward||confirmedAwardTotal)await winner.show({...winnerAward(result,before),format:money,bonusComplete:!!result.bonusEnded||!!confirmedAwardTotal});
+  if(!completedAward||confirmedAwardTotal)await winner.show({...winnerAward(result,serverMode&&!before.bonus&&!before.freeRounds?{...before,bet:before.bet*(rgs.modeOffer(before.mode)?.multiplier??1)}:before),format:money,bonusComplete:!!result.bonusEnded||!!confirmedAwardTotal});
   // Finish the triggering cascade and collection flights first. A confirmed
   // symbol_counter award then requests the zero-cost entry, with no fake swap.
   if(serverMode&&result.state.pendingBonus){
@@ -2356,7 +2415,27 @@ async function play(a,b,swishPlayed=false){if(orientationBlocked()||!startupComp
 $('#sound').onclick=()=>{sound.unlock();sound.enabled=!sound.enabled;$('#sound').style.opacity=sound.enabled?1:.45;};$('#turbo').onclick=()=>{persistentTurbo=!persistentTurbo;updateSpeed();$('#turbo').classList.toggle('active',persistentTurbo);$('#turbo').setAttribute('aria-pressed',String(persistentTurbo));sound.play('click');};
 const bets=[.1,.2,.5,1,2,5,10,20,50,100];
 const betOptions=()=>serverMode?rgs.bets:bets;
-const canChangeBet=()=>!busy&&!state.bonus&&!state.freeRounds&&(!serverMode||rgs.playable);
+const canChangeFeature=()=>!busy&&!state.bonus&&!state.freeRounds&&(!serverMode||rgs.playable);
+const canChangeBet=()=>canChangeFeature()&&(!serverMode||state.mode==='base');
+function showServerFeatures(){
+ if(!canChangeFeature())return;
+ const ice=state.mode==='base'?rgs.iceOffer():null,names={base:'Normal play',luck:'Extra Luck',enhanced:'Enhanced Moves',ice:'Ice Bonus'};
+ const offers=[...['base','luck','enhanced'].map(mode=>rgs.modeOffer(mode)).filter(Boolean),...(ice?[{...ice,mode:'ice'}]:[])];
+ const amount=cost=>money(cost)+(state.currency?' '+state.currency:'');
+ modal('<h2>CHOOSE A MODE</h2><div class="cards">'+offers.map(o=>'<button class="card" data-mode="'+o.mode+'" '+(o.mode===state.mode?'disabled':'')+'><b>'+names[o.mode]+'</b><span>'+(o.mode==='ice'?o.moves+' free moves':o.multiplier+'× base bet · '+amount(o.cost)+' per move')+'</span><span>'+(o.mode===state.mode?'ACTIVE':(o.mode==='ice'?'Buy for ':'Start for ')+amount(o.cost))+'</span></button>').join('')+'</div>'+(state.mode!=='base'?'<p>Return to Normal play to change the base bet or buy the Ice Bonus.</p>':''));
+ document.querySelectorAll('[data-mode]').forEach(button=>button.onclick=()=>{
+  const o=offers.find(o=>o.mode===button.dataset.mode),purchase=o.mode==='ice';
+  $('#dialog-content').innerHTML='<h2>'+names[o.mode]+'</h2><p>'+(purchase?o.moves+' free moves. One-time price: <b>'+amount(o.cost)+'</b>. Bonus moves do not charge another bet.':'Start a new board for <b>'+amount(o.cost)+'</b>. Each following move costs <b>'+amount(o.cost)+'</b>. The current board is replaced.')+'</p><button id="feature-confirm" class="modal-action" '+(state.balance<o.cost?'disabled':'')+'>'+(purchase?'BUY FOR ':'START FOR ')+amount(o.cost)+'</button>'+(state.balance<o.cost?'<p>Insufficient balance</p>':'');
+  $('#feature-confirm').onclick=async()=>{
+   if(!canChangeFeature())return;
+   busy=true;$('#feature-confirm').disabled=true;hud();sound.unlock();
+   try{state=await (purchase?rgs.buy():rgs.mode(o.mode));displayWin=0;displayMult=1;iceMarks.clear();close();if(purchase)await presentBonus();else{draw(state.board);hud();sound.play('click');}}
+   catch(e){if(!rgs.transport.healthy)showConnectionFault();else toast(e.message);}
+   finally{busy=false;hud();}
+  };
+ });
+}
+
 async function chooseBet(value){
  if(!canChangeBet()||!betOptions().includes(value))return false;
  if(value===state.bet)return true;
@@ -2369,7 +2448,7 @@ function changeBet(dir){const options=betOptions(),i=options.indexOf(state.bet);
 $('#minus').onclick=()=>changeBet(-1);$('#plus').onclick=()=>changeBet(1);
 $('#bet-open').onclick=()=>{
  if(!canChangeBet())return;
- modal('<h2 id="bet-dialog-title">CHOOSE BET</h2><p class="modal-subtitle">Select your bet per move</p><div class="choices bet-choices" role="group" aria-labelledby="bet-dialog-title">'+betOptions().map(value=>'<button data-bet="'+value+'" aria-pressed="'+(value===state.bet)+'">'+money(value)+'</button>').join('')+'</div>');
+ modal('<h2 id="bet-dialog-title">CHOOSE BET</h2><p class="modal-subtitle">'+(serverMode&&state.mode!=='base'?'Select base bet · '+rgs.modeOffer(state.mode).multiplier+'× per move':'Select your bet per move')+'</p><div class="choices bet-choices" role="group" aria-labelledby="bet-dialog-title">'+betOptions().map(value=>'<button data-bet="'+value+'" aria-pressed="'+(value===state.bet)+'">'+money(value)+'</button>').join('')+'</div>');
  document.querySelectorAll('[data-bet]').forEach(button=>button.onclick=async()=>{
   if(!canChangeBet())return;
   const buttons=[...document.querySelectorAll('[data-bet]')];buttons.forEach(b=>b.disabled=true);
@@ -2379,11 +2458,11 @@ $('#bet-open').onclick=()=>{
   if(selected)close();else buttons.forEach(b=>b.disabled=false);
  });
 };
-$('#bonus').onclick=()=>{if(serverMode||busy||state.bonus)return;modal('<h2>CHOOSE A MODE</h2><div class="cards">'+[['base','Normal play','1× per move'],['luck','Extra Luck','2× per move · more magic candies'],['enhanced','Enhanced Moves','50× per move · bombs, rockets and multipliers'],['ice','Frosted Factory','100× · buy 5 free moves'],['mayhem','Multi Mayhem','1000× per move · multiplier board']].map(([id,name,desc])=>`<button class="card" data-mode="${id}"><b>${name}</b><span>${desc}</span><span>${money(state.bet*({base:1,luck:2,enhanced:50,ice:100,mayhem:1000}[id]))} credits</span></button>`).join('')+'</div>');document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{const mode=b.dataset.mode;$('#dialog-content').innerHTML='<h2>'+b.querySelector('b').textContent+'</h2><p>'+ (mode==='ice'?'Cost: '+money(state.bet*100)+' demo credits.':'Changing mode is free. Your next move uses the selected price.')+'</p><button id="confirm" class="modal-action">CONFIRM</button>';$('#confirm').onclick=async()=>{if(busy)return;busy=true;try{state=mode==='ice'?rgs.buy():rgs.mode(mode);persist();displayWin=0;displayMult=1;close();if(mode==='ice')await presentBonus();else{draw(state.board);hud();sound.play('click');}}catch(e){toast(e.message);}finally{busy=false;hud();}};});};
+$('#bonus').onclick=()=>{if(serverMode){showServerFeatures();return;}if(busy||state.bonus)return;modal('<h2>CHOOSE A MODE</h2><div class="cards">'+[['base','Normal play','1× per move'],['luck','Extra Luck','2× per move · more magic candies'],['enhanced','Enhanced Moves','50× per move · bombs, rockets and multipliers'],['ice','Frosted Factory','100× · buy 5 free moves'],['mayhem','Multi Mayhem','1000× per move · multiplier board']].map(([id,name,desc])=>`<button class="card" data-mode="${id}"><b>${name}</b><span>${desc}</span><span>${money(state.bet*({base:1,luck:2,enhanced:50,ice:100,mayhem:1000}[id]))} credits</span></button>`).join('')+'</div>');document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{const mode=b.dataset.mode;$('#dialog-content').innerHTML='<h2>'+b.querySelector('b').textContent+'</h2><p>'+ (mode==='ice'?'Cost: '+money(state.bet*100)+' demo credits.':'Changing mode is free. Your next move uses the selected price.')+'</p><button id="confirm" class="modal-action">CONFIRM</button>';$('#confirm').onclick=async()=>{if(busy)return;busy=true;try{state=mode==='ice'?rgs.buy():rgs.mode(mode);persist();displayWin=0;displayMult=1;close();if(mode==='ice')await presentBonus();else{draw(state.board);hud();sound.play('click');}}catch(e){toast(e.message);}finally{busy=false;hud();}};});};
 $('#auto').onclick=()=>{if(serverMode&&!rgs.playable)return;if(auto){stop();return;}modal('<h2>AUTOPLAY</h2><p>Choose the number of paid moves. Stopping autoplay lets the current move finish.</p><div class="choices">'+[5,10,25,50,100,250,500,1000].map(n=>`<button data-count="${n}">${n}</button>`).join('')+'</div>');document.querySelectorAll('[data-count]').forEach(b=>b.onclick=()=>{auto=Number(b.dataset.count);close();hud();if(!busy)play();});};
 $('#settings').onclick=()=>{modal('<h2>SETTINGS</h2><label><input id="sfx-check" type="checkbox" '+(sound.enabled?'checked':'')+'> Sound effects</label><label><input id="music-check" type="checkbox" '+(sound.music?'checked':'')+'> Background music</label><button id="history" class="modal-action" type="button">Move history</button><p>'+(serverMode?'Reload starts a new RGS test session.':'Your board and bonus progress are saved in this browser.')+'</p>');$('#history').onclick=showHistory;$('#sfx-check').onchange=e=>{sound.unlock();sound.enabled=e.target.checked;};$('#music-check').onchange=e=>{sound.unlock();sound.music=e.target.checked;};};
 const showHistory=()=>modal('<h2>MOVE HISTORY</h2><table><tr><th>Time</th><th>Cost</th><th>Win</th><th>Multiplier</th></tr>'+state.history.slice(0,20).map(h=>`<tr><td>${new Date(h.time).toLocaleTimeString('en-US')}</td><td>${h.bonus?'Bonus · ':''}${money(h.cost)}</td><td>${money(h.win)}</td><td>×${h.mult}</td></tr>`).join('')+'</table>');
-$('#rules').onclick=()=>serverMode?modal('<h2>SWEET CASCADE · RGS TEST</h2><p>Swap adjacent symbols. Press Space to use a move suggested by the server. Cascades, wins and your balance come from the test RGS.</p><p>Magic collection, symbol multipliers, ice damage and ice breaking are connected. The final bonus result returns the server-confirmed base board without another stake. Extra bet modes and bonus purchases are unavailable.</p><p>Reload starts a fresh test session. After a connection failure, the last move is never submitted again automatically.</p>'):modal('<h2>SWEET CASCADE</h2><p>Swap adjacent candies to match 3 or more. You can also move a rocket or bomb. Invalid swaps return without charging credits.</p><p>A line of 4 clears a row or column. A line of 5 or more clears that color. Intersections clear their bounding rectangle. Rockets fire in the arrow direction; bombs clear a 3×3 area.</p><p>Every 3 candies destroyed in a cascade step count as one chain. Demo payout: bet × 0.05 × max(chains × multiplier sum − 1, 0). A single match of 3 with no continuation pays nothing.</p><p>Collect 3 magic candies to trigger the ice bonus. Wins and multipliers accumulate during the bonus. Each destroyed magic candy adds one move.</p><p>Press Space for an automatic move; hold to repeat. The board persists between moves and after reloading.</p><p>This client demo uses test generation, no real money and no declared RTP. Final mathematics and unresolved edge cases require the production RGS.</p>');
+$('#rules').onclick=()=>serverMode?modal('<h2>SWEET CASCADE · RGS TEST</h2><p>Swap adjacent symbols. Press Space to use a move suggested by the server. Cascades, wins and your balance come from the test RGS.</p><p>Magic collection, symbol multipliers, ice damage and ice breaking are connected. The final bonus result returns the server-confirmed base board without another stake. The BONUS button offers a server-priced ice bonus purchase. Extra Luck and Enhanced Moves charge the displayed multiplier on each move. Switching modes starts a new board for the displayed price.</p><p>Reload starts a fresh test session. After a connection failure, the last move is never submitted again automatically.</p>'):modal('<h2>SWEET CASCADE</h2><p>Swap adjacent candies to match 3 or more. You can also move a rocket or bomb. Invalid swaps return without charging credits.</p><p>A line of 4 clears a row or column. A line of 5 or more clears that color. Intersections clear their bounding rectangle. Rockets fire in the arrow direction; bombs clear a 3×3 area.</p><p>Every 3 candies destroyed in a cascade step count as one chain. Demo payout: bet × 0.05 × max(chains × multiplier sum − 1, 0). A single match of 3 with no continuation pays nothing.</p><p>Collect 3 magic candies to trigger the ice bonus. Wins and multipliers accumulate during the bonus. Each destroyed magic candy adds one move.</p><p>Press Space for an automatic move; hold to repeat. The board persists between moves and after reloading.</p><p>This client demo uses test generation, no real money and no declared RTP. Final mathematics and unresolved edge cases require the production RGS.</p>');
 window.addEventListener('keydown',e=>{if(e.code==='Escape')stop();});
 app.ticker.add(t=>{const density=renderBudget.sample(t.elapsedMS,startupComplete&&!document.hidden&&!orientationBlocked()&&!$("#dialog").open);if(density!==null)app.renderer.resize(711,711,density);let dt=Math.min(t.deltaMS,50);const hintsAllowed=!busy&&!pointer&&!held&&!auto&&!document.hidden&&!$('#dialog').open&&state.board.length===49&&(!serverMode||rgs.playable);const legalHints=()=>serverMode?rgs.moves():moves(state.board);swipeHint.tick(dt,hintsAllowed,legalHints);if(!hintsAllowed)hintSoundPlayed=false;if(swipeHint.layer.visible&&!hintSoundPlayed){sound.play('hint');hintSoundPlayed=true;}symbolHint.tick(dt,hintsAllowed,legalHints);const hoverActive=hoveredCell!==null&&!busy&&!pointer;hoverOpacity+=(Number(hoverActive)-hoverOpacity)*Math.min(1,dt/110);if(hoverActive)Object.assign(hoverCell,pos(hoveredCell));hoverCell.alpha=hoverOpacity*.94;for(let i=anims.length-1;i>=0;i--){const a=anims[i];a.t+=dt;let p=Math.min(a.t/a.ms,1),e=a.ease(p);if(!a.obj.destroyed)for(const k in a.to)a.obj[k]=a.from[k]+(a.to[k]-a.from[k])*e;if(p===1){anims.splice(i,1);a.resolve();}}for(let i=particles.length-1;i>=0;i--){const p=particles[i];p.life-=dt/1000;p.g.x+=p.vx*dt/1000;p.g.y+=p.vy*dt/1000;p.vy+=460*dt/1000;p.g.alpha=Math.max(0,p.life/p.total);p.g.rotation+=dt*.003;if(p.life<=0){p.g.destroy();particles.splice(i,1);}}for(const n of nodes.values()){boosterVFX.tickArmed(n,performance.now());if(n.whiteOverlay)n.whiteOverlay.alpha=n.white.v;if(['candy','bomb','rocket'].includes(n.kind)){const phase=performance.now()*.0019*n.idleRate+n.phase;const amp=1;const hint=n.clearing?{scale:1,y:0,squash:0,shine:-1}:symbolHint.pose(n.index),wave=boardWavePose(boardWaveElapsed,n.index,boardWaveOrigin);const emphasis=(selected===n.index?1.045:1)*hint.scale;n.sprite.x=wave.x;n.sprite.y=Math.sin(phase)*2.1*amp+hint.y+wave.y;n.sprite.rotation=n.baseSpriteRotation+Math.sin(phase*.79)*.016*amp;n.sprite.scale.set(n.baseSpriteScale*emphasis*(1+Math.sin(phase*1.17)*.016*amp+hint.squash),n.baseSpriteScaleY*emphasis*(1-Math.sin(phase*1.17)*.016*amp-hint.squash));updateHintShine(n,hint.shine);if(n.multiplierLabel){const b=n.multiplierLabel;b.position.copyFrom(n.sprite.position);b.rotation=n.sprite.rotation-n.baseSpriteRotation;b.scale.set((b.baseLabelScale??1)*n.sprite.scale.x/n.baseSpriteScale,(b.baseLabelScale??1)*n.sprite.scale.y/n.baseSpriteScaleY);}}for(const g of n.glows||[]){g.position.copyFrom(n.sprite.position);g.rotation=n.sprite.rotation;g.scale.set(n.sprite.scale.x*g.glowScaleX*g.glowSpread,n.sprite.scale.y*g.glowScaleY*g.glowSpread);}}});
 
@@ -2460,6 +2539,7 @@ if(state.freeRounds?.counter===0){modal('<h2>FREE MOVES</h2><p>'+state.freeRound
 
 
 }
+
 
 
 mountTouchGuard();
