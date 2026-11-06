@@ -463,7 +463,24 @@ class Sound{
  set music(value){this._music=!!value;this.syncMusic();}
  // Music has its own channel and preference; enabled controls sound effects only.
  syncMusic(){this.musicLoop?.setPlaying(this.music&&this.unlocked&&!document.hidden);}
- constructor(){this.enabled=true;this.music=true;this.ctx=null;this.beat=0;this.timer=null;this.cascade=0;this.lastLand=-1;this.popVariant=-1;this.unlocked=false;document.addEventListener('visibilitychange',()=>{if(document.hidden){this.cancelCelebration();for(const v of this.voices||[])try{v.stop();}catch{}this.ctx?.suspend().catch(()=>{});}else if(this.unlocked)this.ctx?.resume().catch(()=>{});this.syncMusic();});}
+ constructor(){this.enabled=true;this.music=true;this.ctx=null;this.beat=0;this.timer=null;this.cascade=0;this.lastLand=-1;this.popVariant=-1;this.unlocked=false;
+  const restore=()=>{if(this.unlocked&&!document.hidden)this.resumeAudio();};
+  document.addEventListener('visibilitychange',()=>{if(document.hidden)this.suspendAudio();else restore();});
+  window.addEventListener('pagehide',()=>this.suspendAudio());window.addEventListener('pageshow',restore);window.addEventListener('focus',restore);
+  // iOS may require a fresh user gesture after an interruption. Retry within
+  // every tap/key gesture, not just the first gesture of the entire session.
+  for(const type of ['pointerdown','touchend','keydown'])document.addEventListener(type,restore,{capture:true,passive:true});
+ }
+ suspendAudio(){
+  this.musicLoop?.setPlaying(false);
+  // Suspending preserves active fanfares and their AudioContext clock.
+  // Stopping sources here made a resumed winner continue silently.
+  this.ctx?.suspend().catch(()=>{}).finally(()=>{if(!document.hidden&&this.unlocked)this.resumeAudio();});
+ }
+ async resumeAudio(){
+  if(!this.ctx||!this.unlocked||document.hidden)return;
+  try{if(this.ctx.state!=='running')await this.ctx.resume();if(!document.hidden)this.syncMusic();}catch{}
+ }
  prepareContext(){if(this.ctx)return;this.ctx=new AudioContext();this.bus=this.ctx.createGain();this.bus.gain.value=.455;this.limiter=this.ctx.createDynamicsCompressor();this.limiter.threshold.value=-14;this.limiter.knee.value=12;this.limiter.ratio.value=5;this.limiter.attack.value=.003;this.limiter.release.value=.12;this.bus.connect(this.limiter).connect(this.ctx.destination);this.musicGain=this.ctx.createGain();this.musicGain.gain.value=.15;this.musicGain.connect(this.ctx.destination);}
  loadSamples(){return this.loading??=this.prepareSamples();}
  async prepareSamples(){this.samples={};this.unavailable=[];try{this.prepareContext();const loader=this.audioLoader=new GameAudioLoader(this.ctx,{urlFor:(name,format)=>AUDIO_FILES[name][format],timeout:16000,concurrency:3});await Promise.all(Object.keys(AUDIO_FILES).map(async name=>{const buffer=await loader.load(name);if(buffer)this.samples[name]=buffer;else this.unavailable.push(name);}));this.musicLoop=new MusicLoop(this.ctx,this.samples.music,this.musicGain);this.syncMusic();}catch{this.unavailable=Object.keys(AUDIO_FILES);}return {unavailable:this.unavailable};}
@@ -484,11 +501,53 @@ if(name==='donutShot')src.playbackRate.value=.98+(step%4)*.035;gain.gain.value=(
   return ()=>{if(stopped)return;stopped=true;const t=this.ctx.currentTime;gain.gain.cancelScheduledValues(t);gain.gain.setValueAtTime(gain.gain.value,t);gain.gain.linearRampToValueAtTime(0,t+fadeOut);try{src.stop(t+fadeOut+.005);}catch{}};
  }
 
- unlock(){this.unlocked=true;try{this.prepareContext();this.ctx.resume().catch(()=>{});this.syncMusic();}catch{}}
+ unlock(){this.unlocked=true;try{this.prepareContext();this.resumeAudio();}catch{}}
  tone(freq,duration=.12,type='sine',gain=.15,delay=0,end=null){if(!this.ctx||!this.enabled||document.hidden)return;const t=this.ctx.currentTime+delay,o=this.ctx.createOscillator(),g=this.ctx.createGain();o.type=type;o.frequency.setValueAtTime(freq,t);if(end)o.frequency.exponentialRampToValueAtTime(end,t+duration);g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(gain,t+.009);g.gain.exponentialRampToValueAtTime(.0001,t+duration);o.connect(g).connect(this.bus);o.start(t);o.stop(t+duration+.02);}
  noise(duration=.2,gain=.12,high=1500){if(!this.ctx||!this.enabled||document.hidden)return;let n=this.ctx.sampleRate*duration,buf=this.ctx.createBuffer(1,n,this.ctx.sampleRate),a=buf.getChannelData(0);for(let i=0;i<n;i++)a[i]=(Math.random()*2-1)*Math.pow(1-i/n,3);let src=this.ctx.createBufferSource(),f=this.ctx.createBiquadFilter(),g=this.ctx.createGain();src.buffer=buf;f.type='lowpass';f.frequency.value=high;g.gain.value=gain;src.connect(f).connect(g).connect(this.bus);src.start();}
  play(name,step=0){if(this.unavailable?.includes(name))return;if(this.sample(name,step))return;if(name==='iceHit')name='ice';if(name==='transition'||name==='winEnd')name='magic';if(name==='multiplier')name='click';if(name==='shuffle')name='magic';if(name==='swap'){this.tone(450,.09,'sine',.2,0,900);}if(name==='invalid'){this.tone(220,.13,'triangle',.12,0,130);}if(name==='pop'){const semitones=CASCADE_NOTE_STEPS;const pitch=2**(semitones[Math.min(semitones.length-1,Math.max(0,step))]/12),f=480*pitch;this.tone(f*1.55,.095,'sine',.31,0,f*.52);this.tone(f*.65,.14,'sine',.13,.018,f*.32);this.noise(.035,.045,2600);this.tone(660*pitch,.23,'sine',.085,.025);this.tone(990*pitch,.15,'sine',.033,.045);if(step>1)this.tone(1320*pitch,.19,'sine',.025,.075);}if(name==='land'&&this.ctx){const now=this.ctx.currentTime;if(now-this.lastLand<.025)return;this.lastLand=now;const pitch=2**(Math.min(step,10)*1.2/12)*(1+(Math.random()-.5)*.1);this.tone(310*pitch,.075,'sine',.15,0,145*pitch);this.tone(155*pitch,.105,'sine',.095,.025,225*pitch);this.tone(730*pitch,.045,'sine',.025,.008,450*pitch);this.noise(.022,.023,1200);}if(name==='ice'){this.noise(.24,.22,7000);this.tone(1900,.25,'sine',.06);}if(name==='bomb'||name==='bombEpic'){this.noise(.4,.5,800);this.tone(160,.35,'sine',.5,0,35);}if(name==='rocket'){this.noise(.3,.3,4000);this.tone(250,.25,'triangle',.1,0,1800);}if(name==='magic'||name==='win'||name==='bonus'){[0,4,7,12,16].forEach((n,i)=>this.tone(523.25*2**(n/12),.4,'sine',.12,i*.085));}if(name==='click')this.tone(700,.045,'sine',.1,0,400);}
  tick(){this.syncMusic();}
+}
+
+// A swipe must never count as a dismiss/continue tap.
+function bindConfirmedTap(element,activate){
+ let touch=null;
+ const cancel=()=>{touch=null;};
+ const move=e=>{if(touch?.id===e.pointerId&&Math.hypot(e.clientX-touch.x,e.clientY-touch.y)>10)touch.dragged=true;};
+ const down=e=>{if(!e.isPrimary||e.button!==0){cancel();return;}e.preventDefault();e.stopImmediatePropagation();touch={id:e.pointerId,x:e.clientX,y:e.clientY,dragged:false};element.setPointerCapture?.(e.pointerId);};
+ const up=e=>{if(touch?.id!==e.pointerId)return;move(e);const tap=!touch.dragged;cancel();e.preventDefault();e.stopImmediatePropagation();if(tap)activate();};
+ const click=e=>{e.preventDefault();e.stopImmediatePropagation();if(e.detail===0)activate();};
+ const hidden=()=>{if(document.hidden)cancel();};
+ element.addEventListener('pointerdown',down);element.addEventListener('pointermove',move);element.addEventListener('pointerup',up);element.addEventListener('pointercancel',cancel);element.addEventListener('lostpointercapture',cancel);element.addEventListener('click',click);
+ window.addEventListener('blur',cancel);document.addEventListener('visibilitychange',hidden);
+ return ()=>{for(const [type,fn]of [['pointerdown',down],['pointermove',move],['pointerup',up],['pointercancel',cancel],['lostpointercapture',cancel],['click',click]])element.removeEventListener(type,fn);window.removeEventListener('blur',cancel);document.removeEventListener('visibilitychange',hidden);};
+}
+
+function mountTouchGuard(){
+ let finger=null,press=null,blockedClick=null;
+ const reset=()=>{finger=press=blockedClick=null;};
+ const start=e=>{finger=e.touches.length===1?{x:e.touches[0].clientX,y:e.touches[0].clientY,target:e.target}:null;};
+ const move=e=>{
+  if(!finger||e.touches.length!==1)return; // Keep accessibility pinch zoom available.
+  const t=e.touches[0],dx=t.clientX-finger.x,dy=t.clientY-finger.y;finger.x=t.clientX;finger.y=t.clientY;
+  const target=finger.target;
+  if(target.closest?.('input[type=range]'))return;
+  // Allow native vertical scrolling only while a dialog can consume this motion.
+  if(Math.abs(dy)>Math.abs(dx)&&target.closest?.('dialog,[role=dialog],[role=alertdialog]')){
+   for(let el=target;el&&el!==document.body;el=el.parentElement){
+    if(/auto|scroll/.test(getComputedStyle(el).overflowY)&&el.scrollHeight>el.clientHeight+1&&((dy<0&&el.scrollTop+el.clientHeight<el.scrollHeight-1)||(dy>0&&el.scrollTop>0)))return;
+   }
+  }
+  if(e.cancelable)e.preventDefault();
+ };
+ const down=e=>{blockedClick=null;press=e.isPrimary?{id:e.pointerId,x:e.clientX,y:e.clientY,dragged:false}:null;};
+ const pointerMove=e=>{if(press?.id===e.pointerId&&Math.hypot(e.clientX-press.x,e.clientY-press.y)>10)press.dragged=true;};
+ const up=e=>{pointerMove(e);if(press?.id===e.pointerId&&press.dragged)blockedClick={until:performance.now()+700};press=null;};
+ const click=e=>{if(e.detail!==0&&blockedClick&&performance.now()<blockedClick.until){e.preventDefault();e.stopImmediatePropagation();}blockedClick=null;};
+ const hidden=()=>{if(document.hidden)reset();};
+ document.addEventListener('touchstart',start,{capture:true,passive:true});document.addEventListener('touchmove',move,{capture:true,passive:false});
+ for(const [type,fn]of [['pointerdown',down],['pointermove',pointerMove],['pointerup',up],['click',click]])document.addEventListener(type,fn,true);
+ window.addEventListener('blur',reset);document.addEventListener('visibilitychange',hidden);
+ return ()=>{document.removeEventListener('touchstart',start,true);document.removeEventListener('touchmove',move,true);for(const [type,fn]of [['pointerdown',down],['pointermove',pointerMove],['pointerup',up],['click',click]])document.removeEventListener(type,fn,true);window.removeEventListener('blur',reset);document.removeEventListener('visibilitychange',hidden);};
 }
 
 // Winner audio is owned by the overlay. No delayed fanfare timers escape it.
@@ -552,7 +611,7 @@ class WinnerOverlay {
   Object.assign(this,{game,onOpen,onClose});this.audio=new WinnerAudio(sound);this.active=false;
   this.root=document.createElement('div');this.root.className='winner-overlay';this.root.hidden=true;this.root.tabIndex=-1;this.root.setAttribute('role','dialog');this.root.setAttribute('aria-modal','true');this.root.setAttribute('aria-label','Win celebration');
   this.canvas=document.createElement('canvas');this.canvas.setAttribute('aria-hidden','true');this.caption=document.createElement('p');this.caption.className='winner-caption';this.caption.textContent='TAP OR PRESS SPACE TO SKIP';this.live=document.createElement('span');this.live.className='winner-live';this.live.setAttribute('aria-live','polite');this.root.append(this.canvas,this.caption,this.live);document.body.append(this.root);this.ctx=this.canvas.getContext('2d');
-  this.root.addEventListener('pointerdown',e=>{e.preventDefault();e.stopImmediatePropagation();this.interact();});this.root.addEventListener('click',e=>{e.preventDefault();e.stopImmediatePropagation();});
+  bindConfirmedTap(this.root,()=>this.interact());
   window.addEventListener('keydown',e=>{if(!this.active)return;if(['Space','Enter','Escape','Tab'].includes(e.code)){e.preventDefault();e.stopImmediatePropagation();if(e.code==='Space')this.swallowSpace=true;if(!e.repeat&&e.code!=='Tab')this.interact();}},true);
   window.addEventListener('keyup',e=>{if(e.code==='Space'&&(this.active||this.swallowSpace)){e.preventDefault();e.stopImmediatePropagation();this.swallowSpace=false;}},true);
   this.ready=this.load();
@@ -568,6 +627,7 @@ class WinnerOverlay {
  interact(){if(!this.active||this.phase==='closing')return;if(this.phase==='counting'){const final=this.timeline.at(-1).tier;if(this.tier!==final)this.setTier(final);this.finishCount();}else if(this.settleTime>500)this.phase='closing';}
  finishCount(){this.value=this.amount;this.phase='settled';this.settleTime=0;this.audio.finish();this.caption.textContent='TAP OR PRESS SPACE TO CONTINUE';this.live.textContent=WINNER_TIERS[this.tier].name+' '+this.format(this.amount);}
  tick(now){
+  if(this.active&&document.hidden){this.last=now;this.frame=requestAnimationFrame(t=>this.tick(t));return;}
   if(!this.active)return;const dt=document.hidden?0:Math.min(50,Math.max(0,now-this.last));this.last=now;this.elapsed+=dt;this.titleTime+=dt;
   if(this.phase==='counting'){const stage=this.timeline[this.index];this.stageTime+=dt;const lead=this.index===0?450:0,audioTime=this.audio.elapsed(this.stageTime),p=Math.max(0,Math.min(1,(audioTime-lead)/(stage.duration-lead)));this.value=this.from+(stage.target-this.from)*(1-(1-p)**1.3);if(audioTime>lead)this.audio.count((this.index+p)/this.timeline.length);if(p>=1){this.from=stage.target;this.stageTime=0;if(++this.index<this.timeline.length)this.setTier(this.timeline[this.index].tier);else this.finishCount();}}
   if(this.phase==='settled'){this.settleTime+=dt;if(this.settleTime>2400)this.phase='closing';}
@@ -607,8 +667,7 @@ class BonusIntro {
   this.root=document.createElement('div');this.root.className='bonus-intro';this.root.hidden=true;this.root.tabIndex=-1;this.root.setAttribute('role','dialog');this.root.setAttribute('aria-modal','true');this.root.setAttribute('aria-label','Ice bonus');
   this.root.innerHTML='<div class="bonus-intro-dim"></div><section class="bonus-intro-card"><h2>ICE BONUS</h2><div class="bonus-intro-art"><div class="bonus-intro-rays"></div></div><h3></h3><p>Break the ice and collect multipliers.<br>Each magic candy adds one extra move.</p><button id="bonus-intro-continue">TAP TO CONTINUE</button></section>';
   document.body.append(this.root);
-  this.root.addEventListener('pointerdown',e=>{e.preventDefault();e.stopImmediatePropagation();this.proceed();});
-  this.root.addEventListener('click',e=>{e.preventDefault();e.stopImmediatePropagation();});
+  bindConfirmedTap(this.root,()=>this.proceed());
   window.addEventListener('keydown',e=>{if(!this.active||!['Space','Enter','Escape','Tab'].includes(e.code))return;e.preventDefault();e.stopImmediatePropagation();if(e.code==='Space')this.swallowSpace=true;if(!e.repeat&&e.code!=='Tab')this.proceed();},true);
   window.addEventListener('keyup',e=>{if(e.code==='Space'&&(this.active||this.swallowSpace)){e.preventDefault();e.stopImmediatePropagation();this.swallowSpace=false;}},true);
  }
@@ -1804,6 +1863,30 @@ class DonutVFX {
  }
 }
 
+// Bake white alpha glows once. Canvas2D.filter is not available in every mobile
+// browser; three separable box passes approximate a Gaussian without GPU filters.
+function softAlphaCanvas(source,sigma){
+ const width=source.width,height=source.height,out=document.createElement('canvas');out.width=width;out.height=height;
+ const ctx=out.getContext('2d'),pixels=source.getContext('2d').getImageData(0,0,width,height);
+ if(sigma<=0){ctx.putImageData(pixels,0,0);return out;}
+ let a=new Float32Array(width*height),b=new Float32Array(a.length);
+ for(let i=0;i<a.length;i++)a[i]=pixels.data[i*4+3];
+ const ideal=Math.sqrt(4*sigma*sigma+1);let low=Math.floor(ideal);if(low%2===0)low--;
+ const high=low+2,m=Math.round((12*sigma*sigma-3*low*low-12*low-9)/(-4*low-4));
+ const pass=(radius,horizontal)=>{
+  const major=horizontal?height:width,minor=horizontal?width:height,stride=horizontal?1:width,divisor=radius*2+1;
+  for(let line=0;line<major;line++){
+   const base=horizontal?line*width:line;let sum=0;
+   for(let j=0;j<=radius&&j<minor;j++)sum+=a[base+j*stride];
+   for(let j=0;j<minor;j++){b[base+j*stride]=sum/divisor;const remove=j-radius,add=j+radius+1;if(remove>=0)sum-=a[base+remove*stride];if(add<minor)sum+=a[base+add*stride];}
+  }
+  [a,b]=[b,a];
+ };
+ for(let i=0;i<3;i++){const radius=((i<m?low:high)-1)/2;pass(radius,true);pass(radius,false);}
+ for(let i=0;i<a.length;i++){pixels.data[i*4]=pixels.data[i*4+1]=pixels.data[i*4+2]=255;pixels.data[i*4+3]=Math.round(a[i]);}
+ ctx.putImageData(pixels,0,0);return out;
+}
+
 // Presentation only. Each candy has its own translucent sugar-fragment silhouette.
 const CLEAR_COLORS=['#00baff','#ff249b','#ffd21a','#59e911','#ff243b','#bf20ff'];
 function clearParticlePath(g,type){
@@ -1827,10 +1910,10 @@ class SymbolClearVFX{
   }));
   // This glow never changes shape: bake the three blurred layers once.
   const cell=document.createElement('canvas');cell.width=cell.height=320;
-  const c=cell.getContext('2d');c.scale(2,2);c.translate(80,80);
-  c.filter='blur(24px)';c.fillStyle='rgba(255,255,255,.78)';c.beginPath();c.roundRect(-40,-40,80,80,12);c.fill();
-  c.filter='blur(16px)';c.strokeStyle='rgba(255,255,255,.85)';c.lineWidth=11;c.beginPath();c.roundRect(-43,-43,86,86,11);c.stroke();
-  c.filter='blur(5.2px)';c.strokeStyle='rgba(255,255,255,.9)';c.lineWidth=3.5;c.beginPath();c.roundRect(-43,-43,86,86,10);c.stroke();
+  const c=cell.getContext('2d');
+  for(const [blur,size,radius,alpha,line]of [[24,80,12,.78,0],[16,86,11,.85,11],[5.2,86,10,.9,3.5]]){
+   const mask=document.createElement('canvas');mask.width=mask.height=320;const g=mask.getContext('2d');g.scale(2,2);g.translate(80,80);g.beginPath();g.roundRect(-size/2,-size/2,size,size,radius);g.fillStyle=g.strokeStyle=`rgba(255,255,255,${alpha})`;g.lineWidth=line;if(line)g.stroke();else g.fill();c.drawImage(softAlphaCanvas(mask,blur),0,0);
+  }
   this.cellTexture=PIXI.Texture.from(cell);
  }
  sprite(parent,texture,tint,size,blend='add'){const s=new PIXI.Sprite(texture);s.anchor.set(.5);s.tint=tint;s.width=s.height=size;s.blendMode=blend;parent.addChild(s);return s;}
@@ -1867,8 +1950,7 @@ function bakedSymbolGlow(source,baseX,baseY,blur=7){
   const mask=document.createElement('canvas');mask.width=w*R;mask.height=h*R;
   const m=mask.getContext('2d');m.drawImage(texture.source.resource,frame.x,frame.y,frame.width,frame.height,pad*R,pad*R,width*R,height*R);
   m.globalCompositeOperation='source-in';m.fillStyle='#fff';m.fillRect(0,0,mask.width,mask.height);
-  const canvas=document.createElement('canvas');canvas.width=mask.width;canvas.height=mask.height;
-  const g=canvas.getContext('2d');if(blur)g.filter=`blur(${blur*R}px)`;g.drawImage(mask,0,0);
+  const canvas=softAlphaCanvas(mask,blur*R);
   art={texture:PIXI.Texture.from(canvas),pad,w,h,width,height};cache.set(key,art);
  }
  const sprite=new PIXI.Sprite(art.texture);
@@ -2118,9 +2200,9 @@ const iceMarks=new IceMultiplierMarks({parent:iceMarkLayer,position:pos,label:mu
 function make(c){const n=new PIXI.Container();n.cid=c.id;n.signature=signature(c);n.kind=c.kind;n.color=c.color;let texture=c.kind==='candy'?textures[c.color]:c.kind==='rocket'?special.rocket[c.dir]:c.kind==='ice'&&iceTextures.length?iceTextures[c.hp<=1?1:0]:special[c.kind];const s=new PIXI.Sprite(texture||textures[c.color]);s.anchor.set(.5);s.width=s.height=c.kind==='ice'&&iceTextures.length?104:80;if(c.kind==='candy'&&candyBounds[c.color]){const b=candyBounds[c.color];s.anchor.set(b.cx/texture.width,b.cy/texture.height);s.width=80*texture.width/b.size*(c.color===1?.92:1);s.height=80*texture.height/b.size*(c.color===1?.92:1);}if(boosterArt[c.kind]){const art=boosterArt[c.kind];s.texture=art.texture;s.anchor.set(art.cx/art.w,art.cy/art.h);s.width=84*art.w/art.size;s.height=84*art.h/art.size;if(c.kind==='rocket')s.rotation=c.dir*Math.PI/2;}n.baseSpriteScale=s.scale.x;n.baseSpriteScaleY=s.scale.y;n.baseSpriteRotation=s.rotation;n.phase=(Number(c.id)*2.399963)||Math.random()*6.28;n.idleRate=.85+((Number(c.id)*.618)%1)*.35;n.addChild(s);n.sprite=s;n.eventMode='none';if(c.kind==='bomb'||c.kind==='rocket'){const aura=symbolGlow(n,0xffc75a,.6,1.16,6),rim=symbolGlow(n,0xfff0b0,.72,1.055,1.8);aura.label='booster-idle-aura';rim.label='booster-idle-rim';}if(c.magic)n.magicRing=symbolGlow(n,0xffdf73,.9,1.22,3.5);if(c.mult){const b=multiplierLabel('×'+c.mult,c.kind==='ice'?36:35,c.kind==='ice');b.position.set(0,0);n.multiplierLabel=b;if(c.kind==='ice'){const damage=c.hp<=1?1:0;b.visible=damage>0;b.alpha=.64;n.addChild(b);s.alpha=damage===0?1:.94;}else n.addChild(b);}if(c.kind==='ice'&&!iceTextures.length&&c.hp<=1){const cracks=new PIXI.Graphics().moveTo(-25,-42).lineTo(2,-9).lineTo(-16,8).lineTo(22,40).stroke({color:0xd8fbff,width:3});n.addChild(cracks);}pieces.addChild(n);nodes.set(c.id,n);return n;}
 
 function updateHintShine(n,phase){
- if(phase<0||busy||n.clearing||n.whiteFilter){if(n.hintShine)n.hintShine.visible=false;if(n.hintMask){n.hintMask.visible=false;n.hintMask.clear();}return;}
- if(!n.hintShine){const sprite=new PIXI.Sprite(n.sprite.texture);sprite.anchor.copyFrom(n.sprite.anchor);const white=new PIXI.ColorMatrixFilter();white.matrix=[0,0,0,0,1,0,0,0,0,1,0,0,0,0,1,0,0,0,1,0];sprite.filters=[white];sprite.blendMode='add';const mask=new PIXI.Graphics();n.addChild(mask,sprite);sprite.mask=mask;n.hintShine=sprite;n.hintMask=mask;}
- const shine=n.hintShine;shine.visible=true;n.hintMask.visible=true;shine.position.copyFrom(n.sprite.position);shine.scale.copyFrom(n.sprite.scale);shine.rotation=n.sprite.rotation;shine.alpha=.8*Math.sin(Math.PI*phase);
+ if(phase<0||busy||n.clearing||n.whiteOverlay){if(n.hintShine)n.hintShine.visible=false;if(n.hintMask){n.hintMask.visible=false;n.hintMask.clear();}return;}
+ if(!n.hintShine){const sprite=bakedSymbolGlow(n.sprite,n.baseSpriteScale,n.baseSpriteScaleY,0);sprite.blendMode='add';const mask=new PIXI.Graphics();n.addChild(mask,sprite);sprite.mask=mask;n.hintShine=sprite;n.hintMask=mask;}
+ const shine=n.hintShine;shine.visible=true;n.hintMask.visible=true;shine.position.copyFrom(n.sprite.position);shine.scale.set(n.sprite.scale.x*shine.glowScaleX,n.sprite.scale.y*shine.glowScaleY);shine.rotation=n.sprite.rotation;shine.alpha=.8*Math.sin(Math.PI*phase);
  const x=-95+190*phase;n.hintMask.clear().poly([x-28,-80,x-5,-80,x+55,80,x+32,80]).fill(0xffffff);
 }
 function draw(board){const ids=new Set(board.filter(Boolean).map(c=>c.id));for(const[id,n]of nodes)if(!ids.has(id)){n.destroy({children:true});nodes.delete(id);}board.forEach((c,i)=>{if(!c)return;let n=nodes.get(c.id);if(n&&n.signature!==signature(c)){n.destroy({children:true});nodes.delete(c.id);n=null;}if(!n)n=make(c);n.index=i;Object.assign(n,pos(i));});visual=clone(board);iceMarks.sync(board,nodes);}
@@ -2168,7 +2250,7 @@ function cellGlow(i){const c=visual[i];return symbolClearVFX.cell(i,c?.kind==='i
 async function dissolveSymbol(i,onImpact=()=>{},quick=false,sparkles=false,sparkleAudio=true){
  const shrink=quick?85:270,rebound=quick?40:110,fade=quick?80:115;
  const c=visual[i],n=nodes.get(c?.id);if(!n)return;iceMarks.hide(i);n.clearing=true;updateHintShine(n,-1);if(n.hintShine){n.hintShine.mask=null;n.hintShine.destroy();n.hintMask.destroy();n.hintShine=n.hintMask=null;}
- cellGlow(i);n.white={v:0};n.whiteFilter=new PIXI.ColorMatrixFilter();n.whiteBlur=new PIXI.BlurFilter({strength:0,quality:1});n.sprite.filters=[n.whiteFilter,n.whiteBlur];
+ cellGlow(i);n.white={v:0};n.whiteOverlay=symbolGlow(n,0xffffff,0,1,0);n.whiteOverlay.blendMode='normal';n.whiteOverlay.label='clear-white-silhouette';n.addChild(n.whiteOverlay);
  const color=c.kind==='ice'?0xb7edff:CLEAR_COLORS[c.color]??0xffdc86;
  const halo=symbolGlow(n,color,0,1.32,9),rim=symbolGlow(n,color,0,1.13,3.4);halo.blendMode='normal';rim.blendMode='add';halo.label='clear-color-halo';rim.label='clear-color-rim';
  await Promise.all([tween(n.scale,{x:.5,y:.5},shrink,t=>t*t),tween(n.white,{v:1},shrink),tween(halo,{alpha:.95},Math.min(200,shrink)),tween(rim,{alpha:.8},shrink)]);
@@ -2219,7 +2301,7 @@ async function play(a,b,swishPlayed=false){if(orientationBlocked()||!startupComp
    }else result=await response;
   }catch(e){if(!serverMode)rgs.s=before;throw e;}
   if(!before.bonus){iceMarks.clear();iceMarks.sync(visual,nodes);}
-  if(!result.accepted){sound.play('invalid');if(result.rejectionReason==='not-in-server-helper')toast('This move is not in the server’s available moves.');const na=nodes.get(visual[a]?.id),nb=nodes.get(visual[b]?.id);if(na&&nb){if(!previewSwap)await Promise.all([tween(na,pos(b),110),tween(nb,pos(a),110)]);await Promise.all([tween(na,pos(a),150),tween(nb,pos(b),150)]);}return;}
+  if(!result.accepted){sound.play('invalid');const na=nodes.get(visual[a]?.id),nb=nodes.get(visual[b]?.id);if(na&&nb){if(!previewSwap)await Promise.all([tween(na,pos(b),110),tween(nb,pos(a),110)]);await Promise.all([tween(na,pos(a),150),tween(nb,pos(b),150)]);}return;}
   persist();state.balance=serverMode?result.state.balance:before.balance-(before.bonus?0:before.bet*({base:1,luck:2,enhanced:50,mayhem:1000}[before.mode]));if(auto&&!before.bonus)auto--;hud();
   const waveAfter=cascadeWaveAfter(result.events),collectionFlights=[];let pendingMult=0,pendingMagic=0,plannedMult=displayMult,plannedMeter=state.meter,previousCascadeWin=before.bonus?.win||0;
   for(const [eventIndex,e] of result.events.entries()){if(e.type==='properties'){if(e.board.some(c=>c?.magic&&!visual.some(old=>old?.id===c.id&&old.magic)))sound.play('magicAppear');draw(e.board);}if(e.type==='progress'){if(!pendingMult&&!pendingMultiplierCollection(result.events,eventIndex)){if(e.mult>displayMult)sound.play('multiplier');displayMult=e.mult;}if(!pendingMagic&&!pendingMagicCollection(result.events,eventIndex)){state.meter=e.meter;plannedMeter=e.meter;}hud();}if(e.type==='swap'){const swapA=e.a??a,swapB=e.b??b;if(!swishPlayed)sound.play('swap');if(state.bonus&&Number.isInteger(e.moves))state.bonus.moves=e.moves;hud();let na=nodes.get(visual[swapA]?.id),nb=nodes.get(visual[swapB]?.id);if(!previewSwap)await Promise.all([tween(na,pos(swapB),165),tween(nb,pos(swapA),165)]);visual=clone(e.board);nodes.get(visual[swapA].id).index=swapA;nodes.get(visual[swapB].id).index=swapB;iceMarks.sync(visual,nodes);}
@@ -2303,7 +2385,7 @@ $('#settings').onclick=()=>{modal('<h2>SETTINGS</h2><label><input id="sfx-check"
 const showHistory=()=>modal('<h2>MOVE HISTORY</h2><table><tr><th>Time</th><th>Cost</th><th>Win</th><th>Multiplier</th></tr>'+state.history.slice(0,20).map(h=>`<tr><td>${new Date(h.time).toLocaleTimeString('en-US')}</td><td>${h.bonus?'Bonus · ':''}${money(h.cost)}</td><td>${money(h.win)}</td><td>×${h.mult}</td></tr>`).join('')+'</table>');
 $('#rules').onclick=()=>serverMode?modal('<h2>SWEET CASCADE · RGS TEST</h2><p>Swap adjacent symbols. Press Space to use a move suggested by the server. Cascades, wins and your balance come from the test RGS.</p><p>Magic collection, symbol multipliers, ice damage and ice breaking are connected. The final bonus result returns the server-confirmed base board without another stake. Extra bet modes and bonus purchases are unavailable.</p><p>Reload starts a fresh test session. After a connection failure, the last move is never submitted again automatically.</p>'):modal('<h2>SWEET CASCADE</h2><p>Swap adjacent candies to match 3 or more. You can also move a rocket or bomb. Invalid swaps return without charging credits.</p><p>A line of 4 clears a row or column. A line of 5 or more clears that color. Intersections clear their bounding rectangle. Rockets fire in the arrow direction; bombs clear a 3×3 area.</p><p>Every 3 candies destroyed in a cascade step count as one chain. Demo payout: bet × 0.05 × max(chains × multiplier sum − 1, 0). A single match of 3 with no continuation pays nothing.</p><p>Collect 3 magic candies to trigger the ice bonus. Wins and multipliers accumulate during the bonus. Each destroyed magic candy adds one move.</p><p>Press Space for an automatic move; hold to repeat. The board persists between moves and after reloading.</p><p>This client demo uses test generation, no real money and no declared RTP. Final mathematics and unresolved edge cases require the production RGS.</p>');
 window.addEventListener('keydown',e=>{if(e.code==='Escape')stop();});
-app.ticker.add(t=>{const density=renderBudget.sample(t.elapsedMS,startupComplete&&!document.hidden&&!orientationBlocked()&&!$("#dialog").open);if(density!==null)app.renderer.resize(711,711,density);let dt=Math.min(t.deltaMS,50);const hintsAllowed=!busy&&!pointer&&!held&&!auto&&!document.hidden&&!$('#dialog').open&&state.board.length===49&&(!serverMode||rgs.playable);const legalHints=()=>serverMode?rgs.moves():moves(state.board);swipeHint.tick(dt,hintsAllowed,legalHints);if(!hintsAllowed)hintSoundPlayed=false;if(swipeHint.layer.visible&&!hintSoundPlayed){sound.play('hint');hintSoundPlayed=true;}symbolHint.tick(dt,hintsAllowed,legalHints);const hoverActive=hoveredCell!==null&&!busy&&!pointer;hoverOpacity+=(Number(hoverActive)-hoverOpacity)*Math.min(1,dt/110);if(hoverActive)Object.assign(hoverCell,pos(hoveredCell));hoverCell.alpha=hoverOpacity*.94;for(let i=anims.length-1;i>=0;i--){const a=anims[i];a.t+=dt;let p=Math.min(a.t/a.ms,1),e=a.ease(p);if(!a.obj.destroyed)for(const k in a.to)a.obj[k]=a.from[k]+(a.to[k]-a.from[k])*e;if(p===1){anims.splice(i,1);a.resolve();}}for(let i=particles.length-1;i>=0;i--){const p=particles[i];p.life-=dt/1000;p.g.x+=p.vx*dt/1000;p.g.y+=p.vy*dt/1000;p.vy+=460*dt/1000;p.g.alpha=Math.max(0,p.life/p.total);p.g.rotation+=dt*.003;if(p.life<=0){p.g.destroy();particles.splice(i,1);}}for(const n of nodes.values()){boosterVFX.tickArmed(n,performance.now());if(n.whiteFilter){const v=n.white.v,k=1-v;n.whiteBlur.strength=.8*v;n.whiteFilter.matrix=[k,0,0,0,v,0,k,0,0,v,0,0,k,0,v,0,0,0,1,0];}if(['candy','bomb','rocket'].includes(n.kind)){const phase=performance.now()*.0019*n.idleRate+n.phase;const amp=1;const hint=n.clearing?{scale:1,y:0,squash:0,shine:-1}:symbolHint.pose(n.index),wave=boardWavePose(boardWaveElapsed,n.index,boardWaveOrigin);const emphasis=(selected===n.index?1.045:1)*hint.scale;n.sprite.x=wave.x;n.sprite.y=Math.sin(phase)*2.1*amp+hint.y+wave.y;n.sprite.rotation=n.baseSpriteRotation+Math.sin(phase*.79)*.016*amp;n.sprite.scale.set(n.baseSpriteScale*emphasis*(1+Math.sin(phase*1.17)*.016*amp+hint.squash),n.baseSpriteScaleY*emphasis*(1-Math.sin(phase*1.17)*.016*amp-hint.squash));updateHintShine(n,hint.shine);if(n.multiplierLabel){const b=n.multiplierLabel;b.position.copyFrom(n.sprite.position);b.rotation=n.sprite.rotation-n.baseSpriteRotation;b.scale.set((b.baseLabelScale??1)*n.sprite.scale.x/n.baseSpriteScale,(b.baseLabelScale??1)*n.sprite.scale.y/n.baseSpriteScaleY);}}for(const g of n.glows||[]){g.position.copyFrom(n.sprite.position);g.rotation=n.sprite.rotation;g.scale.set(n.sprite.scale.x*g.glowScaleX*g.glowSpread,n.sprite.scale.y*g.glowScaleY*g.glowSpread);}}});
+app.ticker.add(t=>{const density=renderBudget.sample(t.elapsedMS,startupComplete&&!document.hidden&&!orientationBlocked()&&!$("#dialog").open);if(density!==null)app.renderer.resize(711,711,density);let dt=Math.min(t.deltaMS,50);const hintsAllowed=!busy&&!pointer&&!held&&!auto&&!document.hidden&&!$('#dialog').open&&state.board.length===49&&(!serverMode||rgs.playable);const legalHints=()=>serverMode?rgs.moves():moves(state.board);swipeHint.tick(dt,hintsAllowed,legalHints);if(!hintsAllowed)hintSoundPlayed=false;if(swipeHint.layer.visible&&!hintSoundPlayed){sound.play('hint');hintSoundPlayed=true;}symbolHint.tick(dt,hintsAllowed,legalHints);const hoverActive=hoveredCell!==null&&!busy&&!pointer;hoverOpacity+=(Number(hoverActive)-hoverOpacity)*Math.min(1,dt/110);if(hoverActive)Object.assign(hoverCell,pos(hoveredCell));hoverCell.alpha=hoverOpacity*.94;for(let i=anims.length-1;i>=0;i--){const a=anims[i];a.t+=dt;let p=Math.min(a.t/a.ms,1),e=a.ease(p);if(!a.obj.destroyed)for(const k in a.to)a.obj[k]=a.from[k]+(a.to[k]-a.from[k])*e;if(p===1){anims.splice(i,1);a.resolve();}}for(let i=particles.length-1;i>=0;i--){const p=particles[i];p.life-=dt/1000;p.g.x+=p.vx*dt/1000;p.g.y+=p.vy*dt/1000;p.vy+=460*dt/1000;p.g.alpha=Math.max(0,p.life/p.total);p.g.rotation+=dt*.003;if(p.life<=0){p.g.destroy();particles.splice(i,1);}}for(const n of nodes.values()){boosterVFX.tickArmed(n,performance.now());if(n.whiteOverlay)n.whiteOverlay.alpha=n.white.v;if(['candy','bomb','rocket'].includes(n.kind)){const phase=performance.now()*.0019*n.idleRate+n.phase;const amp=1;const hint=n.clearing?{scale:1,y:0,squash:0,shine:-1}:symbolHint.pose(n.index),wave=boardWavePose(boardWaveElapsed,n.index,boardWaveOrigin);const emphasis=(selected===n.index?1.045:1)*hint.scale;n.sprite.x=wave.x;n.sprite.y=Math.sin(phase)*2.1*amp+hint.y+wave.y;n.sprite.rotation=n.baseSpriteRotation+Math.sin(phase*.79)*.016*amp;n.sprite.scale.set(n.baseSpriteScale*emphasis*(1+Math.sin(phase*1.17)*.016*amp+hint.squash),n.baseSpriteScaleY*emphasis*(1-Math.sin(phase*1.17)*.016*amp-hint.squash));updateHintShine(n,hint.shine);if(n.multiplierLabel){const b=n.multiplierLabel;b.position.copyFrom(n.sprite.position);b.rotation=n.sprite.rotation-n.baseSpriteRotation;b.scale.set((b.baseLabelScale??1)*n.sprite.scale.x/n.baseSpriteScale,(b.baseLabelScale??1)*n.sprite.scale.y/n.baseSpriteScaleY);}}for(const g of n.glows||[]){g.position.copyFrom(n.sprite.position);g.rotation=n.sprite.rotation;g.scale.set(n.sprite.scale.x*g.glowScaleX*g.glowSpread,n.sprite.scale.y*g.glowScaleY*g.glowSpread);}}});
 
 function showMissingMoves(){
  $('#game').inert=true;if($('#dialog').open)close();const panel=$('#rgs-status');panel.hidden=false;
@@ -2380,5 +2462,6 @@ if(state.freeRounds?.counter===0){modal('<h2>FREE MOVES</h2><p>'+state.freeRound
 }
 
 
+mountTouchGuard();
 try{await startGame();}catch(error){failStartup('The game could not finish loading. Please reload.');console.error('Startup blocked:',error?.message);}
 
