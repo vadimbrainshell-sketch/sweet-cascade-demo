@@ -1054,7 +1054,7 @@ class RgsTransport {
   if(this.fault)return;
   this.trace('client',{kind:'fault',message,pending:this.pending?.payload??null});
   const safeReasons={'Server response timed out.':'Foreground request timed out.','Connection lost.':'WebSocket error or network offline; cause unavailable.','Connection closed.':'WebSocket closed.','Server response does not match the pending request.':'Reply did not match the pending request.'};
-  this.log('session-fault',(safeReasons[message]||'Game data validation failed.')+' Pending='+String(this.pending?.payload.set||'none')+'. Play blocked; no request repeated.');this.fault=message;
+  this.log('session-fault',(safeReasons[message]||'Client validation: '+String(message).replace(/[\r\n]/g,' ').slice(0,140))+' Pending='+String(this.pending?.payload.set||'none')+'. Play blocked; no request repeated.');this.fault=message;
   clearTimeout(this.openTimer);this.opening?.reject(Error(message));this.opening=null;
   if(this.pending){const p=this.pending;this.unknownOutcome||=p.mutation;clearTimeout(p.timer);this.pending=null;p.reject(Error(message));}
   if(this.ws&&this.ws.readyState<2)this.ws.close();this.onFault(message,this.unknownOutcome);
@@ -1078,7 +1078,9 @@ function rgsMove(a,b){
 function rgsHelpers(events,board){
  const h=events.findLast(e=>e.type==='helper');if(!h)throw Error('Server did not return available moves.');
  const cells=rgsMatrix(h.reels),pairs=[];
- cells.forEach((c,i)=>{if(!c)return;if(board[i]?.serverId!==c.id)throw Error('Helper does not match the final board.');for(const [key,j] of [['right',i+1],['down',i+7]])if(c[key]){rgsMove(i,j);pairs.push([i,j]);}});
+ const mismatches=cells.flatMap((c,i)=>c&&board[i]?.serverId!==c.id?[i]:[]);
+ if(mismatches.length){const i=mismatches[0],error=Error('Helper does not match the final board.');error.helperMismatch={count:mismatches.length,column:i%7,row:Math.floor(i/7),got:cells[i].id,expected:board[i]?.serverId??0};throw error;}
+ cells.forEach((c,i)=>{if(!c)return;for(const [key,j] of [['right',i+1],['down',i+7]])if(c[key]){rgsMove(i,j);pairs.push([i,j]);}});
  return pairs;
 }
 class RgsBoardAdapter {
@@ -1240,6 +1242,23 @@ class ServerRGS {
  snapshot(){return structuredClone(this.s);}
  cost(){return this.s.bonus||this.s.freeRounds?0:(this.modeOffer(this.s.mode)?.cost??this.s.bet);}
  moves(){return this.helpers.map(p=>[...p]);}
+ // Diagnostic reconciliation only: never derives payouts or changes the wallet/UI.
+ diagnostic(kind,details){try{this.transport.log?.(kind+':'+this.s.version,'csw1 '+kind+' '+details);}catch{}}
+ auditWin(bet,wallet,{bonusStarted,settlement,move}){
+  const unit=10**(this.s.decimals??2),minor=n=>Math.round(n*unit),amount=n=>Number((n/unit).toFixed(this.s.decimals??2));
+  const cost=minor(bet.total.bet),win=minor(bet.total.win??0),balance=minor(wallet.balance);
+  const context='stake='+this.s.bet+' counter='+(bet.counter??'absent')+' move='+move.column+','+move.row+','+move.direction;
+  const expected=minor(this.s.balance)-cost+win;
+  if(balance!==expected)this.diagnostic('wallet_mismatch','got='+amount(balance)+' expected='+amount(expected)+' before='+this.s.balance+' cost='+amount(cost)+' win='+amount(win)+' '+context);
+  if(bonusStarted){this.bonusAudit={start:balance,win:0,cost:0};return;}
+  if(!this.s.bonus)return;
+  const audit=this.bonusAudit;if(!audit)return; // Do not compare an incomplete/restored series.
+  audit.win+=win;audit.cost+=cost;
+  if(!settlement)return;
+  const credited=balance-audit.start+audit.cost,final=minor(settlement.win);
+  if(final!==audit.win||final!==credited)this.diagnostic('bonus_win_mismatch','final='+amount(final)+' expected_sum_total_win='+amount(audit.win)+' wallet_net='+amount(credited)+' '+context+' fs='+bet.freespin?.counter+'/'+bet.freespin?.limit);
+  this.bonusAudit=null;
+ }
  modeOffer(value){
   const mode=value==='base'?'main':value;
   if(!['main','luck','enhanced'].includes(mode))return null;
@@ -1290,6 +1309,7 @@ class ServerRGS {
    const board=this.adapter.initial(bet.reels),helpers=rgsHelpers(bet.events,board);
    if(!helpers.length||board.some((c,i)=>(c.kind==='ice')!==(i>=35))||board.some(c=>c.kind==='ice'&&c.hp!==2))throw Error('Invalid purchased ice board.');
    const base=structuredClone(this.s.board),baseHelpers=this.moves();
+   this.bonusAudit={start:Math.round(wallet.balance*unit),win:0,cost:0};
    this.ctx=bet.ctx;this.helpers=helpers;
    this.s={...this.s,board,balance:wallet.balance,version:this.s.version+1,mult:1,lastCost:bet.total.bet,awaitingMoves:false,pendingBonus:null,serverWarning:null,
     bonus:{...bonus,base,baseHelpers,bet:this.s.bet,mult:1,lastMoveWin:0,awaitingCompletion:false},
@@ -1359,10 +1379,10 @@ class ServerRGS {
    this.transport.trace?.('client',{kind:'rejected-local-move',...this.lastRejectedMove});
    return {accepted:false,rejectionReason:'not-in-server-helper',board:structuredClone(this.s.board),events:[],helpers:this.moves(),meter:this.s.meter,mult:this.s.mult,state:this.snapshot(),win:0};
   }
-  let sent=false;
+  let sent=false,diagnosticBet;
   try{
    sent=true;const reply=await this.transport.request({set:'bet',action:'move',...move,ctx:this.ctx});
-   const bet=reply.bet,wallet=this.wallet(reply);
+   const bet=reply.bet,wallet=this.wallet(reply);diagnosticBet=bet;
    if(bet?.bonus){const award=readFreeRounds(bet.bonus,bet.bet_sum,this.s.freeRounds);if(award.retainedStake)this.transport.log?.('award-stake','Free rounds reply omitted stake. Retained the confirmed award stake.');bet.bet_sum=award.bet;}
    if(typeof bet?.ctx!=='string'||!bet.ctx||!(this.bets.includes(bet.bet_sum)||this.s.freeRounds?.bet===bet.bet_sum))throw Error('Incomplete move response.');
    if(bet.bet_sum!==this.s.bet)throw Error('Server used a different bet.');
@@ -1431,6 +1451,8 @@ class ServerRGS {
    const awardResult=result.accepted&&!bonusStarted?settleFreeRounds(this.s.freeRounds,bet.bonus,bet.bet_sum,win,this.s.decimals):{active:this.s.freeRounds,completed:null};
    if(awardResult.completed?.knownWin===null)this.transport.log?.('award-total','Final free rounds total is invalid. Wallet preserved; winnings displayed unavailable.');
    const baseHelpers=bonusStarted?this.moves():this.s.bonus?.baseHelpers;
+   // Best-effort logging must never alter the accepted server result.
+   try{this.auditWin(bet,wallet,{bonusStarted,settlement,move});}catch{}
    this.ctx=bet.ctx;this.helpers=result.helpers;
    const awaitingMoves=result.helpers.length===0&&!bonusStarted;
    if(awaitingMoves)this.transport.log?.('missing-next-moves','Confirmed move settled, but no next moves supplied. Further moves blocked; no reset or retry.');
@@ -1439,7 +1461,10 @@ class ServerRGS {
     serverWarning:(bonus||this.s.freeRounds||bet.bonus)&&cost>0?'RGS issue: bonus move charged '+cost.toFixed(2):null,lastCost:cost};
    if(result.accepted&&!bonusStarted)this.s.history=[{time:Date.now(),cost,win,mult:result.mult,bonus:!!settlement||!!bonus||!!this.s.freeRounds||!!awardResult.completed,...(settlement?{bonusTotalWin:settlement.win}:{})},...this.s.history].slice(0,100);
    return {...result,state:this.snapshot(),win,bonusStarted,bonusEnded:!!settlement,bonusTotalWin:settlement?.win,freeRoundsCompleted:awardResult.completed};
-  }catch(e){this.fail(e.message,sent);throw e;}
+  }catch(e){
+   if(e.helperMismatch){const m=e.helperMismatch;this.diagnostic('helper_mismatch','cells='+m.count+' cell='+m.column+','+m.row+' got_id='+m.got+' expected_id='+m.expected+' counter='+(diagnosticBet?.counter??'absent')+' stake='+this.s.bet+' move='+move.column+','+move.row+','+move.direction);}
+   this.fail(e.message,sent);throw e;
+  }
  }
 }
 
