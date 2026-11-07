@@ -462,7 +462,13 @@ class Sound{
  get music(){return this._music;}
  set music(value){this._music=!!value;this.syncMusic();}
  // Music has its own channel and preference; enabled controls sound effects only.
- syncMusic(){this.musicLoop?.setPlaying(this.music&&this.unlocked&&!document.hidden);}
+ syncMusic(){
+  const playing=this.music&&this.unlocked&&!document.hidden;
+  // Mute the dedicated output as well as stopping the loop. A suspended or
+  // interrupted audio device must not retain an audible music channel.
+  if(this.musicGain)this.musicGain.gain.value=playing?.15:0;
+  this.musicLoop?.setPlaying(playing);
+ }
  constructor(){this.enabled=true;this.music=true;this.ctx=null;this.beat=0;this.timer=null;this.cascade=0;this.lastLand=-1;this.popVariant=-1;this.unlocked=false;
   const restore=()=>{if(this.unlocked&&!document.hidden)this.resumeAudio();};
   document.addEventListener('visibilitychange',()=>{if(document.hidden)this.suspendAudio();else restore();});
@@ -532,7 +538,7 @@ function mountTouchGuard(){
   const target=finger.target;
   if(target.closest?.('input[type=range]'))return;
   // Allow native vertical scrolling only while a dialog can consume this motion.
-  if(Math.abs(dy)>Math.abs(dx)&&target.closest?.('dialog,[role=dialog],[role=alertdialog]')){
+  if(Math.abs(dy)>Math.abs(dx)&&target.closest?.('dialog,[role=dialog],[role=alertdialog],#rgs-debug')){
    for(let el=target;el&&el!==document.body;el=el.parentElement){
     if(/auto|scroll/.test(getComputedStyle(el).overflowY)&&el.scrollHeight>el.clientHeight+1&&((dy<0&&el.scrollTop+el.clientHeight<el.scrollHeight-1)||(dy>0&&el.scrollTop>0)))return;
    }
@@ -604,7 +610,7 @@ function winnerEntrance(ms){const t=Math.max(0,Math.min(1,ms/1050)),u=Math.max(0
 const WINNER_ART={
  plaque:'public/winner-v1/optimized/plaque.webp',trumpet:'public/winner-v1/optimized/trumpet.webp',
  titles:['public/winner-v1/optimized/title-big.webp','public/winner-v1/optimized/title-epic.webp','public/winner-v1/optimized/title-mega.webp','public/winner-v1/optimized/title-royal.webp'],
- candies:['public/optimized-v1/candy-blue.webp','public/optimized-v1/candy-pink.webp','public/optimized-v1/candy-yellow.webp','public/optimized-v1/candy-green.webp','public/optimized-v1/candy-red.webp','public/optimized-v1/candy-purple.webp']
+ candies:['public/optimized-v1/candy-blue.webp','public/optimized-v1/candy-orange-clean.webp','public/optimized-v1/candy-yellow.webp','public/optimized-v1/candy-green.webp','public/optimized-v1/candy-red.webp','public/optimized-v1/candy-purple.webp']
 };
 class WinnerOverlay {
  constructor({sound,game,onOpen=()=>{},onClose=()=>{}}){
@@ -663,7 +669,7 @@ class WinnerOverlay {
 // Presentation only. The caller supplies the already confirmed bonus state.
 class BonusIntro {
  constructor({game,sound,onOpen=()=>{}}){
-  Object.assign(this,{game,sound,onOpen});this.active=false;
+  Object.assign(this,{game,sound,onOpen});this.active=false;this.continue=null;
   this.root=document.createElement('div');this.root.className='bonus-intro';this.root.hidden=true;this.root.tabIndex=-1;this.root.setAttribute('role','dialog');this.root.setAttribute('aria-modal','true');this.root.setAttribute('aria-label','Ice bonus');
   this.root.innerHTML='<div class="bonus-intro-dim"></div><section class="bonus-intro-card"><h2>ICE BONUS</h2><div class="bonus-intro-art"><div class="bonus-intro-rays"></div></div><h3></h3><p>Break the ice and collect multipliers.<br>Each magic candy adds one extra move.</p><button id="bonus-intro-continue">TAP TO CONTINUE</button></section>';
   document.body.append(this.root);
@@ -702,7 +708,7 @@ class BonusIntro {
 function landingShakeStrength(count,elapsed=Infinity){return count<24||elapsed<6000?0:Math.min(9,6+(count-24)*.14);}
 function winBounceStrength(gain,bet){return gain>0?Math.min(.34,.07+.065*Math.log2(1+gain/Math.max(.01,bet))):0;}
 
-const palette=['#32cfff','#ff70b5','#ffe240','#76e42e','#ef2940','#cc38f5'];
+const palette=['#32cfff','#ff8216','#ffe240','#76e42e','#ef2940','#cc38f5'];
 function frameTexture(){
  const c=document.createElement('canvas');c.width=c.height=711;
  const g=c.getContext('2d');
@@ -1004,6 +1010,7 @@ class RgsTransport {
   doc?.addEventListener('visibilitychange',this.visibility);win?.addEventListener('pageshow',this.visibility);win?.addEventListener('offline',this.offline);
  }
  get healthy(){return !this.fault&&this.ws?.readyState===1;}
+ trace(direction,payload){try{this.onTrace?.(direction,payload);}catch{/* Diagnostics must never affect a request. */}}
  async connect(){
   if(this.ws)throw Error('Session already started');
   const ws=this.ws=new this.WebSocketImpl(this.url);
@@ -1019,7 +1026,7 @@ class RgsTransport {
   if(this.pending)return Promise.reject(Error('A request is already pending'));
   return new Promise((resolve,reject)=>{
    const p=this.pending={payload,resolve,reject,mutation:payload.set==='bet'&&payload.action!=='reset'};
-   this.arm();try{this.ws.send(JSON.stringify(payload));}catch{this.fail('Could not send request.');}
+   this.arm();try{this.trace('out',payload);this.ws.send(JSON.stringify(payload));}catch{this.fail('Could not send request.');}
   });
  }
  arm(){
@@ -1027,6 +1034,8 @@ class RgsTransport {
   if(!this.doc?.hidden)p.timer=setTimeout(()=>{if(this.pending===p&&!this.doc?.hidden)this.fail('Server response timed out.');},this.timeout);
  }
  receive(data){
+  // Record even late/unsolicited replies; validation below remains unchanged.
+  if(this.onTrace)try{this.trace('in',JSON.parse(data));}catch{this.trace('client',{kind:'invalid-json',message:'Non-JSON response received.'});}
   if(this.fault)return;
   const p=this.pending;if(!p)return; // A duplicate cannot resolve another request without its echoed fields.
   let reply;try{reply=JSON.parse(data);}catch{this.fail('Invalid server response.');return;}
@@ -1039,10 +1048,11 @@ class RgsTransport {
  }
  log(category,message){
   if(!this.healthy||this.logged.has(category)||this.logged.size>=20)return;
-  this.logged.add(category);try{this.ws.send(JSON.stringify({set:'game_log',message:String(message).slice(0,240)}));}catch{}
+  this.logged.add(category);try{const payload={set:'game_log',message:String(message).slice(0,240)};this.trace('out',payload);this.ws.send(JSON.stringify(payload));}catch{}
  }
  fail(message){
   if(this.fault)return;
+  this.trace('client',{kind:'fault',message,pending:this.pending?.payload??null});
   const safeReasons={'Server response timed out.':'Foreground request timed out.','Connection lost.':'WebSocket error or network offline; cause unavailable.','Connection closed.':'WebSocket closed.','Server response does not match the pending request.':'Reply did not match the pending request.'};
   this.log('session-fault',(safeReasons[message]||'Game data validation failed.')+' Pending='+String(this.pending?.payload.set||'none')+'. Play blocked; no request repeated.');this.fault=message;
   clearTimeout(this.openTimer);this.opening?.reject(Error(message));this.opening=null;
@@ -1087,11 +1097,11 @@ class RgsBoardAdapter {
   return c;
  }
  initial(reels){const board=rgsMatrix(reels).map(c=>this.piece(c));if(board.some(c=>!c))throw Error('Incomplete initial board.');return board;}
- replay(previous,bet,requested,{mult=1,meter=0,allowMissingHelpers=false}={}){
+ replay(previous,bet,requested,{mult=1,meter=0,allowMissingHelpers=false,bonus=false}={}){
   if(!bet||!Array.isArray(bet.events))throw Error('Missing server result.');
   const start=rgsMatrix(bet.reels);if(start.some((c,i)=>c?.id!==previous[i]?.serverId))throw Error('Server board differs from the displayed board.');
   if(start.some((c,i)=>c?.id===19&&c.health!==previous[i]?.hp))throw Error('Server ice health changed between moves without a damage event.');
-  let board=start.map((c,i)=>this.piece(c,previous[i])),events=[],step=0,win=0,accepted=false,phase='ready',fired=new Map(),damage=new Map(),magicCells=[],collected=[],regularGroups=[],payouts=[];
+  let board=start.map((c,i)=>this.piece(c,previous[i])),events=[],step=0,win=0,accepted=false,phase='ready',fired=new Map(),damage=new Map(),magicCells=[],moveAwards=[],collected=[],regularGroups=[],payouts=[];
   if(JSON.stringify(board)!==JSON.stringify(previous))events.push({type:'properties',board:structuredClone(board)});
   const properties=mask=>{
    let changed=false;
@@ -1111,6 +1121,10 @@ class RgsBoardAdapter {
     if(!accepted||phase!=='ready'||!Number.isSafeInteger(e.count)||e.count<0)throw Error('Invalid magic progress event.');
     const mask=rgsMatrix(e.reels),indices=mask.flatMap((c,i)=>c?[i]:[]);
     if(!indices.length||indices.some(i=>mask[i].id<7||mask[i].id>12||mask[i].id!==board[i]?.serverId))throw Error('Magic collection does not match the board.');
+    if(bonus&&e.award!==undefined){
+     if(!e.award||e.award.type!==undefined||!Number.isSafeInteger(e.award.number)||e.award.number<1)throw Error('Invalid bonus move award.');
+     moveAwards.push({i:indices[0],number:e.award.number});
+    }
     meter=e.count;magicCells.push(...indices);continue;
    }
    if(e.type==='round_multiplier'){
@@ -1161,7 +1175,7 @@ class RgsBoardAdapter {
     });
     if(magicCells.some(i=>!cells.includes(i))||collected.some(i=>!cells.includes(i)&&!ice.includes(i)))throw Error('Collected symbol was not destroyed.');
     board=clean.map((c,i)=>this.piece(c,board[i]));
-    events.push({type:'destroy',cells,ice,regularGroups,payouts,damage:[...damage.keys()],magicCells:[...new Set(magicCells)],collected:[...new Set(collected)],meter,armed:[],effects,step:step++,win:Math.round(win*100)/100,mult,board:structuredClone(board)});damage.clear();magicCells=[];collected=[];regularGroups=[];payouts=[];phase='clean';continue;
+    events.push({type:'destroy',cells,ice,moveAwards,regularGroups,payouts,damage:[...damage.keys()],magicCells:[...new Set(magicCells)],collected:[...new Set(collected)],meter,armed:[],effects,step:step++,win:Math.round(win*100)/100,mult,board:structuredClone(board)});damage.clear();magicCells=[];moveAwards=[];collected=[];regularGroups=[];payouts=[];phase='clean';continue;
    }
    if(e.type==='tumble'&&e.action==='fall'){
     if(phase!=='clean')throw Error('Unexpected fall sequence.');
@@ -1203,9 +1217,11 @@ function finalBonus(bet,previous){
  if(finals.length!==1||!previous)throw Error('Unexpected bonus settlement.');
  const event=finals[0],index=bet.events.indexOf(event);
  if(bet.events.slice(index+1).some(e=>e.type!=='helper'))throw Error('Gameplay after bonus settlement.');
- if(!Number.isFinite(event.win)||event.win<0)throw Error('Invalid final bonus win.');
+ // RGS confirmed: omitted win in final_win means zero (explicit invalid values do not).
+ const win=Object.hasOwn(event,'win')?event.win:0;
+ if(!Number.isFinite(win)||win<0)throw Error('Invalid final bonus win.');
  if(event.matrix&&event.reels&&JSON.stringify(event.matrix)!==JSON.stringify(event.reels))throw Error('Conflicting bonus return boards.');
- return {event,index,matrix:event.matrix??event.reels};
+ return {event,index,win,matrix:event.matrix??event.reels};
 }
 function rgsFreeSpin(value,previous=null){
  if(value===undefined||value===null){if(previous)throw Error('Bonus completion/return contract is not verified yet.');return null;}
@@ -1340,6 +1356,7 @@ class ServerRGS {
   if(!this.helpers.some(([x,y])=>(x===a&&y===b)||(x===b&&y===a))){
    // Local-only diagnostic: no session context, credentials or automatic request.
    this.lastRejectedMove={pair:[a,b],reason:'not-in-server-helper',board:structuredClone(this.s.board),helpers:this.moves()};
+   this.transport.trace?.('client',{kind:'rejected-local-move',...this.lastRejectedMove});
    return {accepted:false,rejectionReason:'not-in-server-helper',board:structuredClone(this.s.board),events:[],helpers:this.moves(),meter:this.s.meter,mult:this.s.mult,state:this.snapshot(),win:0};
   }
   let sent=false;
@@ -1352,7 +1369,8 @@ class ServerRGS {
    const win=bet.total?.win??0,cost=bet.total?.bet;
    if(!Number.isFinite(win)||win<0||!Number.isFinite(cost)||cost<0)throw Error('Invalid server totals.');
    const settlement=finalBonus(bet,this.s.bonus);
-   const bonus=settlement&&bet.freespin==null?null:rgsFreeSpin(bet.freespin,this.s.bonus),bonusStarted=!!bonus&&!this.s.bonus;
+   const previousBonus=this.s.bonus;
+   const bonus=settlement&&bet.freespin==null?null:rgsFreeSpin(bet.freespin,previousBonus?{...previousBonus,limit:previousBonus.serverLimit??previousBonus.limit}:null),bonusStarted=!!bonus&&!previousBonus;
    // An awarded transition is a distinct request, never another paid swap.
    if(entering&&(!bonusStarted||bonus.limit!==this.s.pendingBonus.number||bet.bonus))throw Error('Server did not confirm the awarded bonus entry.');
    if(settlement&&(cost!==0||(bonus&&bonus.moves!==0)))throw Error('Invalid bonus settlement progress or debit.');
@@ -1372,8 +1390,18 @@ class ServerRGS {
      if(!events.some(e=>e.type==='helper'))events.push({type:'helper',reels:Array.from({length:7},()=>Array(7).fill(0))});
      replayBet={...bet,events};
     }
-    result=this.adapter.replay(this.s.board,replayBet,[a,b],{meter:this.s.meter,mult:this.s.bonus?this.s.mult:1,allowMissingHelpers:!settlement});
+    result=this.adapter.replay(this.s.board,replayBet,[a,b],{meter:this.s.meter,mult:this.s.bonus?this.s.mult:1,allowMissingHelpers:!settlement,bonus:!!previousBonus});
     if(bonus&&bonus.counter!==this.s.bonus.counter+(result.accepted?1:0))throw Error('Unexpected bonus move counter.');
+   }
+   if(bonus&&previousBonus){
+    const added=result.events.reduce((sum,e)=>sum+(e.moveAwards??[]).reduce((n,a)=>n+a.number,0),0);
+    if(!Number.isSafeInteger(previousBonus.limit+added))throw Error('Invalid bonus move award.');
+    // award is immediate; freespin.limit may catch up on the next response.
+    // Preserve raw progress for validation and do not add that catch-up twice.
+    bonus.serverLimit=bonus.limit;bonus.limit=Math.max(bonus.limit,previousBonus.limit+added);bonus.moves=bonus.limit-bonus.counter;
+    if(settlement&&bonus.moves!==0)throw Error('Bonus settled with awarded moves remaining.');
+    let shownMoves=previousBonus.moves-(result.accepted?1:0);
+    for(const e of result.events){if(e.type==='swap')e.moves=shownMoves;if(e.type==='destroy'){shownMoves+=(e.moveAwards??[]).reduce((n,a)=>n+a.number,0);e.moves=shownMoves;}}
    }
    if(settlement){
     if(!result.accepted)throw Error('Bonus settled without a confirmed move.');
@@ -1409,8 +1437,8 @@ class ServerRGS {
    this.s={...this.s,pendingBonus,awaitingMoves,freeRounds:awardResult.active,board:result.board,balance:wallet.balance,currency:wallet.currency??this.s.currency,version:this.s.version+1,meter:result.meter,mult:result.mult,
     bonus:!settlement&&bonus?{...bonus,base:bonusStarted?structuredClone(this.s.board):this.s.bonus.base,baseHelpers,bet:this.s.bet,mult:result.mult,lastMoveWin:win,awaitingCompletion:bonus.moves===0}:null,
     serverWarning:(bonus||this.s.freeRounds||bet.bonus)&&cost>0?'RGS issue: bonus move charged '+cost.toFixed(2):null,lastCost:cost};
-   if(result.accepted&&!bonusStarted)this.s.history=[{time:Date.now(),cost,win,mult:result.mult,bonus:!!settlement||!!bonus||!!this.s.freeRounds||!!awardResult.completed,...(settlement?{bonusTotalWin:settlement.event.win}:{})},...this.s.history].slice(0,100);
-   return {...result,state:this.snapshot(),win,bonusStarted,bonusEnded:!!settlement,bonusTotalWin:settlement?.event.win,freeRoundsCompleted:awardResult.completed};
+   if(result.accepted&&!bonusStarted)this.s.history=[{time:Date.now(),cost,win,mult:result.mult,bonus:!!settlement||!!bonus||!!this.s.freeRounds||!!awardResult.completed,...(settlement?{bonusTotalWin:settlement.win}:{})},...this.s.history].slice(0,100);
+   return {...result,state:this.snapshot(),win,bonusStarted,bonusEnded:!!settlement,bonusTotalWin:settlement?.win,freeRoundsCompleted:awardResult.completed};
   }catch(e){this.fail(e.message,sent);throw e;}
  }
 }
@@ -1947,7 +1975,7 @@ function softAlphaCanvas(source,sigma){
 }
 
 // Presentation only. Each candy has its own translucent sugar-fragment silhouette.
-const CLEAR_COLORS=['#00baff','#ff249b','#ffd21a','#59e911','#ff243b','#bf20ff'];
+const CLEAR_COLORS=['#00baff','#ff7812','#ffd21a','#59e911','#ff243b','#bf20ff'];
 function clearParticlePath(g,type){
  g.beginPath();
  if(type===0){g.moveTo(-16,-28);g.lineTo(22,-20);g.quadraticCurveTo(30,-18,27,-8);g.lineTo(19,24);g.quadraticCurveTo(17,31,8,28);g.lineTo(-25,20);g.quadraticCurveTo(-31,18,-28,8);g.lineTo(-23,-21);g.quadraticCurveTo(-22,-29,-16,-28);g.closePath();}
@@ -2173,6 +2201,76 @@ async function mountRoyalCandyLogo(host,{canAnimate=()=>true}={}){
  host.logoController={play,cancel,destroy,layers};schedule(2200);return host.logoController;
 }
 
+// Small illustrations reuse the game's textures; no extra raster atlas or animation loop.
+function rulesMarkup(serverMode){
+ const art={green:'public/optimized-v1/candy-green.webp',pink:'public/optimized-v1/candy-orange-clean.webp',yellow:'public/optimized-v1/candy-yellow.webp',purple:'public/optimized-v1/candy-purple.webp',bomb:'public/optimized-v1/bomb.webp',rocket:'public/optimized-v1/rocket.webp',donut:'public/optimized-v1/donut.webp',ice:'public/optimized-v1/ice-damaged.webp'};
+ const candy=(name,extra='')=>`<span class="rule-symbol ${extra}"><img src="${art[name]}" alt="" width="64" height="64"></span>`;
+ const row=(name,count)=>Array.from({length:count},()=>candy(name)).join('');
+ const card=(label,visual,title,text)=>`<article class="rule-card"><div class="rule-picture" role="img" aria-label="${label}">${visual}</div><h3>${title}</h3><p>${text}</p></article>`;
+ return `<h2>HOW TO PLAY</h2><p class="modal-subtitle">A sweet move can start a royal cascade.</p><div class="rules-grid">
+ ${card('Swap two neighbouring candies',candy('green')+'<span class="rule-arrow">↔</span>'+candy('pink'),'Swap & match','Slide a candy into a neighbouring cell. Match 3 or more of the same colour. An invalid swap returns to its starting position.')}
+ ${card('Three matching green candies',row('green',3),'Keep the cascade going','Matched candies disappear. New candies fall into the gaps and can create another match.')}
+ ${card('Four yellow candies clear a line',row('yellow',4)+'<span class="rule-line"></span>','4 in a line','A straight match of 4 clears a row or column.')}
+ ${card('Five pink candies and a colour-clearing donut','<div class="rule-mini-row">'+row('pink',5)+'</div>'+candy('donut'),'5 in a line','A straight match of 5 or more triggers the donut and clears candies of that colour.')}
+ ${card('Rocket and bomb boosters',candy('rocket')+candy('bomb'),'A bigger blast','Swap a booster with a neighbour. Rockets clear in their direction; bombs blast the surrounding area. Other clears can trigger boosters too.')}
+ ${card('Three glowing magic candies fill the bonus meter',row('purple',3).replaceAll('rule-symbol ','rule-symbol rule-magic '),'Collect the magic','Collect 3 glowing magic candies to unlock the Ice Bonus.')}
+ ${card('Damaged ice containing a multiplier',candy('ice')+'<span class="rule-mult">×30</span>','Break the ice','Ice takes 2 hits. Clear nearby candies or hit it with a booster. Collect multipliers as the ice breaks.')}
+ ${card('Magic candy and one extra move',candy('purple','rule-magic')+'<span class="rule-extra">+1</span>','Free moves','Play the ice field without paying for each move. Magic candies award extra moves. The bonus finishes with your total win.')}
+ </div><section class="rules-controls"><h3>Quick controls</h3><p><kbd>SPACE</kbd> Make an automatic move · hold to repeat</p><p><b>Turbo</b> speeds up play. <b>Auto</b> plays the number of moves you choose. Adjust your bet with <b>− / +</b> or tap the bet panel.</p></section>
+ <details class="rules-details"><summary>Bets, modes & winnings</summary><p>${serverMode?'Each paid move uses the price displayed in the bet panel. Extra Luck costs 2× the base bet; Enhanced Moves costs 50×. Switching modes starts a new board for the price shown in the confirmation. The Ice Bonus purchase price is shown before you confirm.':'Normal play costs 1×, Extra Luck 2×, Enhanced Moves 50× and Multi Mayhem 1000× your base bet per move. The Ice Bonus costs 100× for 5 starting free moves.'}</p><p>${serverMode?'Winnings, multipliers and the remaining free moves follow the game result. A match does not necessarily award a win.':'In this demo, each group of 3 cleared candies counts as one chain. Payout = bet × 0.05 × max(chains × multiplier sum − 1, 0). A single match of 3 without a continuation pays nothing.'}</p></details>
+ <p class="modal-footnote">${serverMode?'Test credits · Reload starts a new test session.':'Demo credits · Your progress is saved in this browser.'}</p>`;
+}
+
+// Local, bounded diagnostics. Never retain contexts/authentication or send requests.
+function redactRgs(value){
+ const secret=/^(ctx|seed|signin|cookie|set_cookie|set-cookie|authorization|token|access_token|refresh_token|password|secret|eval)$/i;
+ if(Array.isArray(value))return value.map(redactRgs);
+ if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).map(([k,v])=>[k,secret.test(k)?'[REDACTED]':k==='location'?'[REDACTED]':redactRgs(v)]));
+ return value;
+}
+class RgsDebugLog{
+ constructor({limit=120,maxBytes=4*1024*1024,onChange=()=>{}}={}){Object.assign(this,{limit,maxBytes,onChange});this.entries=[];this.sequence=0;this.transaction=0;this.bytes=0;}
+ add(direction,payload){
+  if(direction==='out'&&payload.set!=='game_log')this.transaction++;
+  const entry={id:++this.sequence,time:new Date().toISOString(),transaction:this.transaction,direction,payload:redactRgs(payload)};
+  entry.bytes=JSON.stringify(entry).length*2;this.entries.push(entry);this.bytes+=entry.bytes;
+  while(this.entries.length>1&&(this.entries.length>this.limit||this.bytes>this.maxBytes))this.bytes-=this.entries.shift().bytes;
+  this.onChange(entry);return entry;
+ }
+ clear(){this.entries=[];this.bytes=0;this.onChange();}
+ export(entries=this.entries){return JSON.stringify({game:'csw1',capturedAt:new Date().toISOString(),redacted:true,messages:entries.map(({bytes,...e})=>e)},null,2);}
+ lastMove(){
+  const request=this.entries.findLast(e=>e.direction==='out'&&e.payload.set==='bet');
+  if(!request)return this.export();
+  const previous=this.entries.findLast(e=>e.id<request.id&&e.direction==='in'&&e.payload.bet);
+  return this.export(this.entries.filter(e=>e===previous||e.transaction===request.transaction||e.id>request.id));
+ }
+}
+function mountRgsDebug({transport,board,serverMode}){
+ const root=document.createElement('section');root.id='rgs-debug';root.setAttribute('aria-label','RGS diagnostics');
+ root.innerHTML='<div class="rgs-debug-head"><b>RGS LOG</b><button type="button" data-debug="collapse" aria-expanded="true">Свернуть</button></div><div class="rgs-debug-body"><p class="rgs-debug-note"></p><div class="rgs-debug-actions"><button type="button" data-debug="turn">Копировать ход</button><button type="button" data-debug="all">Весь лог</button><button type="button" data-debug="clear">Очистить</button></div><select size="5" aria-label="Сообщения RGS"></select><button type="button" data-debug="one">Копировать сообщение</button><textarea readonly spellcheck="false" aria-label="JSON сообщения RGS"></textarea><p class="rgs-debug-feedback" role="status"></p></div>';
+ document.body.append(root);
+ const select=root.querySelector('select'),details=root.querySelector('textarea'),feedback=root.querySelector('.rgs-debug-feedback');
+ root.querySelector('.rgs-debug-note').textContent=serverMode?'Команды → / ответы ←. «Ход» включает предыдущее поле, запрос, ответ и ошибку. Секреты скрыты.':'Локальное демо: запросов RGS нет. Панель запишет обмен при запуске серверной игры.';
+ let frame=0,selected=null,follow=true;
+ const log=new RgsDebugLog({onChange:()=>{if(!frame)frame=requestAnimationFrame(render);}});
+ const summary=e=>{const p=e.payload,b=p.bet,q=p.on??p,events=b?.events?.map(e=>e.type).filter((v,i,a)=>a.indexOf(v)===i).join(', ');return `${e.id} ${e.time.slice(11,19)} ${e.direction==='out'?'→':e.direction==='in'?'←':'!'} ${q.set??p.kind??''} ${q.action??''}${q.column!==undefined?' ['+q.column+','+q.row+'] '+q.direction:''}${p.message?' '+p.message:''}${events?' · '+events:''}`;};
+ function render(){frame=0;select.replaceChildren();for(const e of log.entries){const option=document.createElement('option');option.value=String(e.id);option.textContent=summary(e);select.append(option);}if(follow)selected=log.entries.at(-1)?.id;const entry=log.entries.find(e=>e.id===selected)??log.entries.at(-1);selected=entry?.id;select.value=String(selected??'');details.value=entry?JSON.stringify(entry.payload,null,2):'';if(follow)select.scrollTop=select.scrollHeight;}
+ select.addEventListener('change',()=>{selected=Number(select.value);follow=selected===log.entries.at(-1)?.id;render();});
+ async function copy(text){try{await navigator.clipboard.writeText(text);feedback.textContent='Скопировано';}catch{details.value=text;details.focus();details.select();try{if(!document.execCommand('copy'))throw Error();feedback.textContent='Скопировано';}catch{feedback.textContent='Текст выделен — нажмите «Копировать» или Ctrl+C.';}}}
+ root.querySelector('[data-debug=turn]').onclick=()=>copy(log.lastMove());
+ root.querySelector('[data-debug=all]').onclick=()=>copy(log.export());
+ root.querySelector('[data-debug=one]').onclick=()=>copy(details.value);
+ root.querySelector('[data-debug=clear]').onclick=()=>{log.clear();feedback.textContent='Локальный журнал очищен';};
+ root.querySelector('[data-debug=collapse]').onclick=e=>{const collapsed=root.classList.toggle('collapsed');e.currentTarget.textContent=collapsed?'Развернуть':'Свернуть';e.currentTarget.setAttribute('aria-expanded',String(!collapsed));};
+ const place=()=>{const r=board.getBoundingClientRect(),room=r.left-16,compact=room<220;root.classList.toggle('compact',compact);root.style.left=(compact?8:Math.max(8,r.left-Math.min(350,room)-8))+'px';root.style.top=(compact?8:Math.max(8,r.top))+'px';root.style.width=(compact?Math.min(350,innerWidth-16):Math.min(350,room))+'px';root.style.maxHeight=Math.max(120,innerHeight-(compact?8:Math.max(8,r.top))-8)+'px';};
+ const resize=new ResizeObserver(place);resize.observe(board);window.addEventListener('resize',place);window.visualViewport?.addEventListener('resize',place);window.addEventListener('gameorientationchange',()=>requestAnimationFrame(place));place();
+ if(innerHeight>=innerWidth){root.classList.add('collapsed');root.querySelector('[data-debug=collapse]').textContent='Развернуть';root.querySelector('[data-debug=collapse]').setAttribute('aria-expanded','false');}
+ if(transport)transport.onTrace=(direction,payload)=>log.add(direction,payload);
+ log.add('client',{kind:'session',mode:serverMode?'RGS':'local-demo',url:location.origin+location.pathname});
+ return log;
+}
+
 async function startGame(){
 const $=s=>document.querySelector(s), money=n=>Number.isFinite(n)?n.toLocaleString('en-US',{minimumFractionDigits:state?.decimals??2,maximumFractionDigits:state?.decimals??2}):'—';
 mountLayout($('#game'));
@@ -2183,6 +2281,7 @@ const visualPreview=!serverMode&&params.get('preview')==='vfx';
 const KEY='sweet-cascade-v1';let saved;if(!visualPreview)try{saved=JSON.parse(localStorage.getItem(KEY));}catch{}
 
 const rgs=serverMode?new ServerRGS({onFault:message=>{if(!startupComplete)failStartup(message==='Awarded moves need an initial board context from RGS. Reset was not sent.'?'RGS did not provide the board context for your free moves. Waiting for a server fix.':'Connection could not be prepared. Please reload.');else queueMicrotask(showConnectionFault);}}):new DemoRGS(saved),sound=new Sound();let state=rgs.snapshot(),busy=serverMode,held=false,auto=0,speed=1,selected=null,displayWin=state.bonus?.win||0,displayMult=state.bonus?.mult||1,lastInput=Date.now();
+if(params.get('rgslog')!=='0'&&(serverMode||params.has('qa')||params.get('rgslog')==='1'))mountRgsDebug({transport:rgs.transport,board:$('#board'),serverMode});
 let startupComplete=false,roundRunning=false,fastRequested=false,persistentTurbo=false,autoTimer=null;
 const winner=new WinnerOverlay({sound,game:$('#game'),onOpen:()=>{hold.cancel();fastRequested=false;updateSpeed();swipeHint.reset();symbolHint.reset();},onClose:()=>{lastInput=Date.now();}});
 const bonusIntro=new BonusIntro({sound,game:$('#game'),onOpen:()=>{stop();swipeHint.reset();symbolHint.reset();}});
@@ -2206,7 +2305,7 @@ function signature(c){return [c.kind,c.color,c.hp,c.magic,c.mult,c.dir].join(':'
 // Runtime candies are 256px; keep bounds in texture pixels for every consumer.
 // Glows, fragments, hint masks and magic flights share these exact alpha edges.
 await prepareTask('candies',async()=>{
- for(const [type,url]of [[0,'public/optimized-v1/candy-blue.webp'],[1,'public/optimized-v1/candy-pink.webp'],[2,'public/optimized-v1/candy-yellow.webp'],[3,'public/optimized-v1/candy-green.webp'],[4,'public/optimized-v1/candy-red.webp'],[5,'public/optimized-v1/candy-purple.webp']]){
+ for(const [type,url]of [[0,'public/optimized-v1/candy-blue.webp'],[1,'public/optimized-v1/candy-orange-clean.webp'],[2,'public/optimized-v1/candy-yellow.webp'],[3,'public/optimized-v1/candy-green.webp'],[4,'public/optimized-v1/candy-red.webp'],[5,'public/optimized-v1/candy-purple.webp']]){
   const texture=await PIXI.Assets.load(url),w=texture.width,h=texture.height;
   texture.source.scaleMode='linear';
   const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
@@ -2322,9 +2421,10 @@ function popFlash(i,color){const g=new PIXI.Graphics();for(let r=40;r>0;r-=4)g.c
 function showCombinationWin({amount,cells,color}){
  if(!(amount>0)||!cells.length)return;
  const coords=cells.map(pos),x=coords.reduce((v,p)=>v+p.x,0)/coords.length,y=Math.min(...coords.map(p=>p.y))-12;
- const t=multiplierLabel(money(amount),36);t.label='combination-win';t.style.fill=CLEAR_COLORS[color]??'#ffe69b';t.scale.set(1);t.position.set(Math.max(85,Math.min(625,x)),Math.max(46,y));fx.addChild(t);
- const sy=t.y;t.scale.set(.75);
- animate(1000,u=>{if(t.destroyed)return;const enter=Math.min(1,u/.15);t.scale.set(.75+.25*(1-(1-enter)**3));t.y=sy-42*u;t.alpha=u<.65?1:Math.max(0,(1-u)/.35);}).finally(()=>t.destroy());
+ const winColor=(CLEAR_COLORS[color]??'#ffe69b').replace(/[0-9a-f]{2}/gi,channel=>Math.round(parseInt(channel,16)*.82).toString(16).padStart(2,'0')),winScale=1.15;
+ const t=multiplierLabel(money(amount),36);t.label='combination-win';t.style.stroke={color:'#ffffff',width:4.5,join:'round'};t.style.dropShadow={color:'#44204d',blur:3,distance:2,angle:Math.PI/2,alpha:.35};t.style.fill=winColor;t.position.set(Math.max(85,Math.min(625,x)),Math.max(46,y));fx.addChild(t);
+ const sy=t.y;t.scale.set(.75*winScale);
+ animate(1000,u=>{if(t.destroyed)return;const enter=Math.min(1,u/.15);t.scale.set(winScale*(.75+.25*(1-(1-enter)**3)));t.y=sy-42*u;t.alpha=u<.65?1:Math.max(0,(1-u)/.35);}).finally(()=>t.destroy());
 }
 function float(text,i,color='#ffffff'){const isMultiplier=text.startsWith('×'),muted=isMultiplier&&visual[i]?.kind==='ice';let t=isMultiplier?multiplierLabel(text,36,muted):label(text,30,color);if(muted)t.alpha=.7;Object.assign(t,pos(i));fx.addChild(t);tween(t,{y:t.y-70,alpha:0},800).then(()=>t.destroy());}
 async function shuffleBoard(board){sound.play('shuffle');float('SHUFFLE',24);const moving=()=>[...nodes.values()].filter(n=>n.kind!=='ice');await Promise.all(moving().map(n=>Promise.all([tween(n,{x:350,y:350,rotation:Math.PI,alpha:0},400),tween(n.scale,{x:.1,y:.1},400)])));draw(board);for(const n of moving()){n.rotation=0;n.scale.set(.1);n.alpha=0;}await Promise.all(moving().map(n=>Promise.all([tween(n.scale,{x:1,y:1},300),tween(n,{alpha:1},250)])));}
@@ -2334,9 +2434,9 @@ function hud(winGain){const gain=winGain??Math.max(0,displayWin-lastHudWin);last
 function persist(){if(serverMode||visualPreview)return;localStorage.setItem(KEY,JSON.stringify(rgs.snapshot()));}
 let toastTimer;function toast(t){$('#toast').textContent=t;$('#toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),3000);}
 function updateSpeed(){speed=persistentTurbo||held||fastRequested?1.8:1;}
-const hold=bindHoldInput(null,new HoldInput({act:()=>{if(roundRunning){if(!hold.active)fastRequested=true;updateSpeed();}else play();},canAct:()=>startupComplete&&!winner.active&&!bonusIntro.active&&!orientationBlocked()&&!document.hidden&&!$('#dialog').open&&(!serverMode||rgs.transport.healthy)&&(roundRunning||(!busy&&(!serverMode||rgs.playable))),onHeld:value=>{held=value;updateSpeed();},onManual:()=>{auto=0;clearTimeout(autoTimer);hud();}}),{reserveSpace:true,ownsSpace:()=>!winner.active&&!bonusIntro.active,cancel:()=>{stop();cancelDrag();}});
+const hold=bindHoldInput(null,new HoldInput({act:()=>{if(roundRunning){if(!hold.active)fastRequested=true;updateSpeed();}else play();},canAct:()=>startupComplete&&!winner.active&&!bonusIntro.active&&!orientationBlocked()&&!document.hidden&&!$('#dialog').open&&(!serverMode||rgs.transport.healthy)&&(roundRunning||(!busy&&(!serverMode||rgs.playable))),onHeld:value=>{held=value;updateSpeed();},onManual:()=>{auto=0;clearTimeout(autoTimer);hud();}}),{reserveSpace:true,ownsSpace:()=>!document.activeElement?.closest?.('#rgs-debug')&&!winner.active&&!bonusIntro.active,cancel:()=>{stop();cancelDrag();}});
 function stop(){hold.cancel();held=false;auto=0;fastRequested=false;updateSpeed();clearTimeout(autoTimer);hud();}
-function modal(html){swipeHint.reset();stop();$('#dialog-content').innerHTML=html;$('#dialog').showModal();}
+function modal(html){swipeHint.reset();symbolHint.reset();stop();const dialog=$('#dialog');$('#dialog-content').innerHTML=html;$('#dialog-content').scrollTop=0;dialog.classList.toggle('rules-dialog',html.includes('rules-grid'));dialog.setAttribute('aria-label',$('#dialog-content h2')?.textContent||'Royal Candy');dialog.scrollTop=0;if(!dialog.open)dialog.showModal();}
 function close(){sound.cancelCelebration();$('#dialog').close();lastInput=Date.now();}$('#close').onclick=close;$('#dialog').addEventListener('close',()=>sound.cancelCelebration());
 document.addEventListener('pointerdown',()=>sound.unlock(),{once:true});
 let pointer=null;
@@ -2386,7 +2486,7 @@ async function play(a,b,swishPlayed=false){if(orientationBlocked()||!startupComp
      for(const p of pendingPayouts)if(p.remaining.delete(i)&&!p.remaining.size)showCombinationWin(p);
      if(donutRemaining.delete(i)&&!donutRemaining.size){sound.play('donutPop');sound.play('sparkles');}
      if(c.kind==='ice')iceMarks.remember(i,c);
-     if(c.magic&&(!serverMode||e.magicCells?.includes(i))){const rank=magicCollectors.indexOf(i);if(rank>=0){pendingMagic++;collectionFlights.push((async()=>{try{if(rank)await pause(rank*80);await flyMagic(i,c,magicValues[rank]);}finally{pendingMagic--;}})());}else{sound.play('magic');float(serverMode?'★':'+1 MOVE',i);}}if(c.mult&&(!serverMode||e.collected?.includes(i))){const rank=collectors.indexOf(i);if(rank>=0){const n=nodes.get(c.id);if(n?.multiplierLabel)n.multiplierLabel.visible=false;pendingMult++;collectionFlights.push((async()=>{try{if(rank)await pause(rank*85);await flyMultiplier(i,c.mult,arrivalValues[rank]);}finally{pendingMult--;}})());}else float('×'+c.mult,i);}
+     if(c.magic&&(!serverMode||e.magicCells?.includes(i))){const rank=magicCollectors.indexOf(i);if(rank>=0){pendingMagic++;collectionFlights.push((async()=>{try{if(rank)await pause(rank*80);await flyMagic(i,c,magicValues[rank]);}finally{pendingMagic--;}})());}else{sound.play('magic');const awarded=e.moveAwards?.find(a=>a.i===i)?.number;float(serverMode?(awarded?'+'+awarded+' MOVE'+(awarded===1?'':'S'):'★'):'+1 MOVE',i);}}if(c.mult&&(!serverMode||e.collected?.includes(i))){const rank=collectors.indexOf(i);if(rank>=0){const n=nodes.get(c.id);if(n?.multiplierLabel)n.multiplierLabel.visible=false;pendingMult++;collectionFlights.push((async()=>{try{if(rank)await pause(rank*85);await flyMultiplier(i,c.mult,arrivalValues[rank]);}finally{pendingMult--;}})());}else float('×'+c.mult,i);}
     },rocketCells.has(i),audioPlan.sparkles,!audioPlan.donutHits.length);}));await clearSound;
     await Promise.all([effectsDone,blastSounds]);
     for(const i of cells){const id=visual[i]?.id,n=nodes.get(id);if(n){n.destroy({children:true});nodes.delete(id);}visual[i]=null;}
@@ -2422,10 +2522,10 @@ function showServerFeatures(){
  const ice=state.mode==='base'?rgs.iceOffer():null,names={base:'Normal play',luck:'Extra Luck',enhanced:'Enhanced Moves',ice:'Ice Bonus'};
  const offers=[...['base','luck','enhanced'].map(mode=>rgs.modeOffer(mode)).filter(Boolean),...(ice?[{...ice,mode:'ice'}]:[])];
  const amount=cost=>money(cost)+(state.currency?' '+state.currency:'');
- modal('<h2>CHOOSE A MODE</h2><div class="cards">'+offers.map(o=>'<button class="card" data-mode="'+o.mode+'" '+(o.mode===state.mode?'disabled':'')+'><b>'+names[o.mode]+'</b><span>'+(o.mode==='ice'?o.moves+' free moves':o.multiplier+'× base bet · '+amount(o.cost)+' per move')+'</span><span>'+(o.mode===state.mode?'ACTIVE':(o.mode==='ice'?'Buy for ':'Start for ')+amount(o.cost))+'</span></button>').join('')+'</div>'+(state.mode!=='base'?'<p>Return to Normal play to change the base bet or buy the Ice Bonus.</p>':''));
+ modal('<h2>CHOOSE A MODE</h2><p class="modal-subtitle">A little more magic for your next move.</p><div class="cards">'+offers.map(o=>'<button class="card" data-mode="'+o.mode+'" '+(o.mode===state.mode?'disabled':'')+'><b>'+names[o.mode]+'</b><span>'+(o.mode==='ice'?o.moves+' free moves':o.multiplier+'× base bet · '+amount(o.cost)+' per move')+'</span><span>'+(o.mode===state.mode?'ACTIVE':(o.mode==='ice'?'Buy for ':'Start for ')+amount(o.cost))+'</span></button>').join('')+'</div>'+(state.mode!=='base'?'<p>Return to Normal play to change the base bet or buy the Ice Bonus.</p>':''));
  document.querySelectorAll('[data-mode]').forEach(button=>button.onclick=()=>{
   const o=offers.find(o=>o.mode===button.dataset.mode),purchase=o.mode==='ice';
-  $('#dialog-content').innerHTML='<h2>'+names[o.mode]+'</h2><p>'+(purchase?o.moves+' free moves. One-time price: <b>'+amount(o.cost)+'</b>. Bonus moves do not charge another bet.':'Start a new board for <b>'+amount(o.cost)+'</b>. Each following move costs <b>'+amount(o.cost)+'</b>. The current board is replaced.')+'</p><button id="feature-confirm" class="modal-action" '+(state.balance<o.cost?'disabled':'')+'>'+(purchase?'BUY FOR ':'START FOR ')+amount(o.cost)+'</button>'+(state.balance<o.cost?'<p>Insufficient balance</p>':'');
+  $('#dialog-content').innerHTML='<div class="confirm-art" data-feature="'+o.mode+'" aria-hidden="true"></div><h2>'+names[o.mode]+'</h2><p>'+(purchase?o.moves+' free moves. One-time price: <b>'+amount(o.cost)+'</b>. Bonus moves do not charge another bet.':'Start a new board for <b>'+amount(o.cost)+'</b>. Each following move costs <b>'+amount(o.cost)+'</b>. The current board is replaced.')+'</p><button id="feature-confirm" class="modal-action" '+(state.balance<o.cost?'disabled':'')+'>'+(purchase?'BUY FOR ':'START FOR ')+amount(o.cost)+'</button>'+(state.balance<o.cost?'<p>Insufficient balance</p>':'');
   $('#feature-confirm').onclick=async()=>{
    if(!canChangeFeature())return;
    busy=true;$('#feature-confirm').disabled=true;hud();sound.unlock();
@@ -2458,11 +2558,11 @@ $('#bet-open').onclick=()=>{
   if(selected)close();else buttons.forEach(b=>b.disabled=false);
  });
 };
-$('#bonus').onclick=()=>{if(serverMode){showServerFeatures();return;}if(busy||state.bonus)return;modal('<h2>CHOOSE A MODE</h2><div class="cards">'+[['base','Normal play','1× per move'],['luck','Extra Luck','2× per move · more magic candies'],['enhanced','Enhanced Moves','50× per move · bombs, rockets and multipliers'],['ice','Frosted Factory','100× · buy 5 free moves'],['mayhem','Multi Mayhem','1000× per move · multiplier board']].map(([id,name,desc])=>`<button class="card" data-mode="${id}"><b>${name}</b><span>${desc}</span><span>${money(state.bet*({base:1,luck:2,enhanced:50,ice:100,mayhem:1000}[id]))} credits</span></button>`).join('')+'</div>');document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{const mode=b.dataset.mode;$('#dialog-content').innerHTML='<h2>'+b.querySelector('b').textContent+'</h2><p>'+ (mode==='ice'?'Cost: '+money(state.bet*100)+' demo credits.':'Changing mode is free. Your next move uses the selected price.')+'</p><button id="confirm" class="modal-action">CONFIRM</button>';$('#confirm').onclick=async()=>{if(busy)return;busy=true;try{state=mode==='ice'?rgs.buy():rgs.mode(mode);persist();displayWin=0;displayMult=1;close();if(mode==='ice')await presentBonus();else{draw(state.board);hud();sound.play('click');}}catch(e){toast(e.message);}finally{busy=false;hud();}};});};
-$('#auto').onclick=()=>{if(serverMode&&!rgs.playable)return;if(auto){stop();return;}modal('<h2>AUTOPLAY</h2><p>Choose the number of paid moves. Stopping autoplay lets the current move finish.</p><div class="choices">'+[5,10,25,50,100,250,500,1000].map(n=>`<button data-count="${n}">${n}</button>`).join('')+'</div>');document.querySelectorAll('[data-count]').forEach(b=>b.onclick=()=>{auto=Number(b.dataset.count);close();hud();if(!busy)play();});};
-$('#settings').onclick=()=>{modal('<h2>SETTINGS</h2><label><input id="sfx-check" type="checkbox" '+(sound.enabled?'checked':'')+'> Sound effects</label><label><input id="music-check" type="checkbox" '+(sound.music?'checked':'')+'> Background music</label><button id="history" class="modal-action" type="button">Move history</button><p>'+(serverMode?'Reload starts a new RGS test session.':'Your board and bonus progress are saved in this browser.')+'</p>');$('#history').onclick=showHistory;$('#sfx-check').onchange=e=>{sound.unlock();sound.enabled=e.target.checked;};$('#music-check').onchange=e=>{sound.unlock();sound.music=e.target.checked;};};
-const showHistory=()=>modal('<h2>MOVE HISTORY</h2><table><tr><th>Time</th><th>Cost</th><th>Win</th><th>Multiplier</th></tr>'+state.history.slice(0,20).map(h=>`<tr><td>${new Date(h.time).toLocaleTimeString('en-US')}</td><td>${h.bonus?'Bonus · ':''}${money(h.cost)}</td><td>${money(h.win)}</td><td>×${h.mult}</td></tr>`).join('')+'</table>');
-$('#rules').onclick=()=>serverMode?modal('<h2>SWEET CASCADE · RGS TEST</h2><p>Swap adjacent symbols. Press Space to use a move suggested by the server. Cascades, wins and your balance come from the test RGS.</p><p>Magic collection, symbol multipliers, ice damage and ice breaking are connected. The final bonus result returns the server-confirmed base board without another stake. The BONUS button offers a server-priced ice bonus purchase. Extra Luck and Enhanced Moves charge the displayed multiplier on each move. Switching modes starts a new board for the displayed price.</p><p>Reload starts a fresh test session. After a connection failure, the last move is never submitted again automatically.</p>'):modal('<h2>SWEET CASCADE</h2><p>Swap adjacent candies to match 3 or more. You can also move a rocket or bomb. Invalid swaps return without charging credits.</p><p>A line of 4 clears a row or column. A line of 5 or more clears that color. Intersections clear their bounding rectangle. Rockets fire in the arrow direction; bombs clear a 3×3 area.</p><p>Every 3 candies destroyed in a cascade step count as one chain. Demo payout: bet × 0.05 × max(chains × multiplier sum − 1, 0). A single match of 3 with no continuation pays nothing.</p><p>Collect 3 magic candies to trigger the ice bonus. Wins and multipliers accumulate during the bonus. Each destroyed magic candy adds one move.</p><p>Press Space for an automatic move; hold to repeat. The board persists between moves and after reloading.</p><p>This client demo uses test generation, no real money and no declared RTP. Final mathematics and unresolved edge cases require the production RGS.</p>');
+$('#bonus').onclick=()=>{if(serverMode){showServerFeatures();return;}if(busy||state.bonus)return;modal('<h2>CHOOSE A MODE</h2><p class="modal-subtitle">A little more magic for your next move.</p><div class="cards">'+[['base','Normal play','1× per move'],['luck','Extra Luck','2× per move · more magic candies'],['enhanced','Enhanced Moves','50× per move · bombs, rockets and multipliers'],['ice','Ice Bonus','100× · buy 5 free moves'],['mayhem','Multi Mayhem','1000× per move · multiplier board']].map(([id,name,desc])=>`<button class="card" data-mode="${id}"><b>${name}</b><span>${desc}</span><span>${money(state.bet*({base:1,luck:2,enhanced:50,ice:100,mayhem:1000}[id]))} credits</span></button>`).join('')+'</div>');document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{const mode=b.dataset.mode;$('#dialog-content').innerHTML='<h2>'+b.querySelector('b').textContent+'</h2><p>'+ (mode==='ice'?'Cost: '+money(state.bet*100)+' demo credits.':'Changing mode is free. Your next move uses the selected price.')+'</p><button id="confirm" class="modal-action">CONFIRM</button>';$('#confirm').onclick=async()=>{if(busy)return;busy=true;try{state=mode==='ice'?rgs.buy():rgs.mode(mode);persist();displayWin=0;displayMult=1;close();if(mode==='ice')await presentBonus();else{draw(state.board);hud();sound.play('click');}}catch(e){toast(e.message);}finally{busy=false;hud();}};});};
+$('#auto').onclick=()=>{if(serverMode&&!rgs.playable)return;if(auto){stop();return;}modal('<h2>AUTOPLAY</h2><p class="modal-subtitle">Choose how many paid moves to play.</p><p class="modal-note">Tap Auto again to stop after the current move.</p><div class="choices">'+[5,10,25,50,100,250,500,1000].map(n=>`<button data-count="${n}">${n}</button>`).join('')+'</div>');document.querySelectorAll('[data-count]').forEach(b=>b.onclick=()=>{auto=Number(b.dataset.count);close();hud();if(!busy)play();});};
+$('#settings').onclick=()=>{modal('<h2>SETTINGS</h2><p class="modal-subtitle">Make yourself at home.</p><div class="settings-list"><label class="setting-row"><span><b>Sound effects</b><small>Swaps, candy pops & celebrations</small></span><input id="sfx-check" type="checkbox" '+(sound.enabled?'checked':'')+'><span class="setting-switch" aria-hidden="true"></span></label><label class="setting-row"><span><b>Music</b><small>A little melody for your kingdom</small></span><input id="music-check" type="checkbox" '+(sound.music?'checked':'')+'><span class="setting-switch" aria-hidden="true"></span></label></div><button id="history" class="modal-action secondary-action" type="button">Move history <span aria-hidden="true">→</span></button><p class="modal-footnote">'+(serverMode?'Test credits · Reload starts a new session.':'Your board and bonus progress are saved in this browser.')+'</p>');$('#history').onclick=showHistory;$('#sfx-check').onchange=e=>{sound.unlock();sound.enabled=e.target.checked;};$('#music-check').onchange=e=>{sound.unlock();sound.music=e.target.checked;};};
+const showHistory=()=>modal('<h2>MOVE HISTORY</h2><p class="modal-subtitle">Your last 20 moves at a glance.</p>'+(state.history.length?'<div class="history-scroll"><table><thead><tr><th>Time</th><th>Cost</th><th>Win</th><th>Multiplier</th></tr></thead><tbody>'+state.history.slice(0,20).map(h=>`<tr><td>${new Date(h.time).toLocaleTimeString('en-US')}${h.bonus?'<small class="history-bonus">BONUS</small>':''}</td><td>${money(h.cost)}</td><td class="history-win">${money(h.win)}</td><td>×${h.mult}</td></tr>`).join('')+'</tbody></table></div>':'<div class="modal-empty"><img src="public/optimized-v1/candy-yellow.webp" width="72" height="72" alt=""><h3>Your story starts with a move</h3><p>Completed moves will appear here.</p></div>'));
+$('#rules').onclick=()=>modal(rulesMarkup(serverMode));
 window.addEventListener('keydown',e=>{if(e.code==='Escape')stop();});
 app.ticker.add(t=>{const density=renderBudget.sample(t.elapsedMS,startupComplete&&!document.hidden&&!orientationBlocked()&&!$("#dialog").open);if(density!==null)app.renderer.resize(711,711,density);let dt=Math.min(t.deltaMS,50);const hintsAllowed=!busy&&!pointer&&!held&&!auto&&!document.hidden&&!$('#dialog').open&&state.board.length===49&&(!serverMode||rgs.playable);const legalHints=()=>serverMode?rgs.moves():moves(state.board);swipeHint.tick(dt,hintsAllowed,legalHints);if(!hintsAllowed)hintSoundPlayed=false;if(swipeHint.layer.visible&&!hintSoundPlayed){sound.play('hint');hintSoundPlayed=true;}symbolHint.tick(dt,hintsAllowed,legalHints);const hoverActive=hoveredCell!==null&&!busy&&!pointer;hoverOpacity+=(Number(hoverActive)-hoverOpacity)*Math.min(1,dt/110);if(hoverActive)Object.assign(hoverCell,pos(hoveredCell));hoverCell.alpha=hoverOpacity*.94;for(let i=anims.length-1;i>=0;i--){const a=anims[i];a.t+=dt;let p=Math.min(a.t/a.ms,1),e=a.ease(p);if(!a.obj.destroyed)for(const k in a.to)a.obj[k]=a.from[k]+(a.to[k]-a.from[k])*e;if(p===1){anims.splice(i,1);a.resolve();}}for(let i=particles.length-1;i>=0;i--){const p=particles[i];p.life-=dt/1000;p.g.x+=p.vx*dt/1000;p.g.y+=p.vy*dt/1000;p.vy+=460*dt/1000;p.g.alpha=Math.max(0,p.life/p.total);p.g.rotation+=dt*.003;if(p.life<=0){p.g.destroy();particles.splice(i,1);}}for(const n of nodes.values()){boosterVFX.tickArmed(n,performance.now());if(n.whiteOverlay)n.whiteOverlay.alpha=n.white.v;if(['candy','bomb','rocket'].includes(n.kind)){const phase=performance.now()*.0019*n.idleRate+n.phase;const amp=1;const hint=n.clearing?{scale:1,y:0,squash:0,shine:-1}:symbolHint.pose(n.index),wave=boardWavePose(boardWaveElapsed,n.index,boardWaveOrigin);const emphasis=(selected===n.index?1.045:1)*hint.scale;n.sprite.x=wave.x;n.sprite.y=Math.sin(phase)*2.1*amp+hint.y+wave.y;n.sprite.rotation=n.baseSpriteRotation+Math.sin(phase*.79)*.016*amp;n.sprite.scale.set(n.baseSpriteScale*emphasis*(1+Math.sin(phase*1.17)*.016*amp+hint.squash),n.baseSpriteScaleY*emphasis*(1-Math.sin(phase*1.17)*.016*amp-hint.squash));updateHintShine(n,hint.shine);if(n.multiplierLabel){const b=n.multiplierLabel;b.position.copyFrom(n.sprite.position);b.rotation=n.sprite.rotation-n.baseSpriteRotation;b.scale.set((b.baseLabelScale??1)*n.sprite.scale.x/n.baseSpriteScale,(b.baseLabelScale??1)*n.sprite.scale.y/n.baseSpriteScaleY);}}for(const g of n.glows||[]){g.position.copyFrom(n.sprite.position);g.rotation=n.sprite.rotation;g.scale.set(n.sprite.scale.x*g.glowScaleX*g.glowSpread,n.sprite.scale.y*g.glowScaleY*g.glowSpread);}}});
 

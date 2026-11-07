@@ -269,7 +269,7 @@ body #win{display:inline-block;transform-origin:50% 60%}
 .bonus-intro{position:fixed;inset:0;z-index:10000;overflow:hidden;display:grid;place-items:center;touch-action:none;outline:none;cursor:pointer;font-family:LilitaOne,sans-serif;color:#fff}
 .bonus-intro[hidden]{display:none}
 .bonus-intro-dim{position:absolute;inset:0;background:rgba(12,15,40,.7)}
-.bonus-intro-card{position:relative;display:flex;flex-direction:column;align-items:center;text-align:center;width:min(580px,90vw);padding:15px;box-sizing:border-box}
+.bonus-intro-card{position:relative;display:flex;flex-direction:column;align-items:center;text-align:center;width:min(580px,90vw);padding:15px;box-sizing:border-box;background:none;border:0;box-shadow:none}
 .bonus-intro-card h2{font:400 clamp(25px,4.8vh,44px)/1.1 LilitaOne;margin:0 0 20px;color:#fff4cf;text-shadow:0 3px #67385c}
 .bonus-intro-art{position:relative;width:min(230px,29vh,50vw);aspect-ratio:1;margin:0 0 22px;isolation:isolate}
 .bonus-intro-art img{position:relative;width:100%;height:100%;object-fit:contain;filter:drop-shadow(0 0 16px #a0e9ff88)}
@@ -285,3 +285,109 @@ body #win{display:inline-block;transform-origin:50% 60%}
 .winner-overlay canvas{display:block;width:100%;height:100%;pointer-events:none}
 .winner-caption{position:absolute;left:0;right:0;bottom:max(7%,env(safe-area-inset-bottom));margin:0;text-align:center;font-size:clamp(12px,1.25vw,20px);letter-spacing:.5px;color:#f6e5ff!important;pointer-events:none}
 .winner-live{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+
+/* Royal Candy dialogs: quiet cream panels, lilac edges and candy-pink actions. */
+body #dialog,body #rgs-status>div{color:#52365f!important;background:linear-gradient(155deg,#fffaf0,#fff4f7);border:3px solid #bd96d1;border-radius:26px;box-shadow:inset 0 2px 0 #fff,0 6px 0 #856596,0 20px 60px #25123866;padding:32px;max-height:calc(100dvh - 32px);scrollbar-width:thin;scrollbar-color:#c89cd4 #f6e8f0}
+body #dialog{width:min(620px,calc(100vw - 28px));max-width:860px;overflow:hidden}
+body #dialog-content{max-height:calc(100dvh - 104px);overflow:auto;overscroll-behavior:contain;padding:0 5px 5px;scrollbar-width:thin;scrollbar-color:#c89cd4 transparent}
+body #dialog[open]{animation:royal-dialog-in .18s ease-out}
+@keyframes royal-dialog-in{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
+body #dialog.rules-dialog{width:min(860px,calc(100vw - 28px))}
+body #dialog::backdrop{background:#1d163b94;backdrop-filter:blur(3px)}
+body #rgs-status{background:#1d163b94}
+body #rgs-status>div{width:min(520px,100%);text-align:center}
+body #dialog *,body #rgs-status>div *{color:#52365f!important}
+body #dialog-content::before,body #rgs-status>div::before{content:'ROYAL CANDY';display:block;text-align:center;font-size:12px;letter-spacing:2.5px;color:#a773a6;margin:0 38px 12px}
+body #dialog h2,body #rgs-status h2{font-size:clamp(25px,4.5vw,34px);line-height:1.08;letter-spacing:.3px;text-align:center;margin:0 28px 18px;padding:0;color:#643e77!important}
+body #dialog h3{font-size:22px;line-height:1.12;margin:0 0 8px}
+body #dialog p,body #dialog li,body #rgs-status p{font-size:16px;line-height:1.5;color:#6c5775!important}
+body #dialog .modal-subtitle{font-size:16px;color:#8c6f92!important;margin:-6px 0 24px;text-align:center}
+body #dialog .modal-footnote{font-size:13px;line-height:1.4;text-align:center;color:#907b97!important;margin:22px 0 0}
+body #dialog .modal-note{padding:12px 16px;background:#f0e8f6;border-radius:12px;font-size:14px;margin:0 0 20px}
+body #dialog #close{position:absolute;top:12px;right:12px;display:grid;place-items:center;width:36px;height:36px;padding:0;border:1px solid #d5bddf;border-radius:50%;background:#f0e6f6;color:#745282!important;font-size:28px;line-height:1;box-shadow:none;z-index:1}
+body #dialog button:focus-visible,body #dialog summary:focus-visible,body #rgs-reload:focus-visible{outline:3px solid #b24b91;outline-offset:3px}
+body #dialog .modal-action,body #rgs-reload{display:block;width:100%;min-height:48px;margin:24px 0 5px;padding:12px 22px;border:1px solid #f9b8db;border-radius:15px;background:linear-gradient(#f18dbf,#dc559e);color:white!important;font-size:20px;line-height:1.2;box-shadow:inset 0 2px 0 #ffffff60,0 3px 0 #ac417d}
+body #dialog .modal-action *,body #rgs-reload *{color:inherit!important}
+body #dialog .secondary-action{background:#f0e6f6;color:#725083!important;border-color:#d4b9e1;box-shadow:0 3px 0 #cfb7dc;display:flex;align-items:center;justify-content:space-between}
+body #dialog .choices{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;padding:0 0 5px}
+body #dialog .choices button{min-height:50px;min-width:0;padding:13px 6px;border:1px solid #dac5e6;border-radius:14px;background:linear-gradient(#fff,#f0e5f8);box-shadow:0 3px 0 #cfb6de;color:#6c4980!important;font-size:21px;overflow-wrap:anywhere}
+body #dialog .bet-choices button[aria-pressed=true]{background:linear-gradient(#f48dc3,#dd5aa5);color:#fff!important;border-color:#f8aed4;box-shadow:0 3px 0 #ad4a83}
+body #dialog .cards{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+body #dialog .card{position:relative;min-width:0;text-align:center;padding:16px 12px;border:1px solid #ddcbe8;border-radius:18px;background:#fffdfd;box-shadow:0 3px 0 #eadced}
+body #dialog .card::before{content:'';display:block;width:64px;height:64px;margin:0 auto 10px;background:center/contain no-repeat url('public/optimized-v1/candy-yellow.webp')}
+body #dialog .card[data-mode=luck]::before{background-image:url('public/optimized-v1/candy-purple.webp');filter:drop-shadow(0 0 6px #ffc45a88)}
+body #dialog .card[data-mode=enhanced]::before{background-image:url('public/optimized-v1/bomb.webp')}
+body #dialog .card[data-mode=ice]::before{background-image:url('public/optimized-v1/ice-damaged.webp')}
+body #dialog .card[data-mode=mayhem]::before{background-image:url('public/optimized-v1/donut.webp')}
+body #dialog .confirm-art{width:76px;height:76px;margin:0 auto 14px;background:center/contain no-repeat url('public/optimized-v1/candy-yellow.webp')}
+body #dialog .confirm-art[data-feature=ice]{background-image:url('public/optimized-v1/ice-damaged.webp')}
+body #dialog .confirm-art[data-feature=luck]{background-image:url('public/optimized-v1/candy-purple.webp')}
+body #dialog .confirm-art[data-feature=enhanced]{background-image:url('public/optimized-v1/bomb.webp')}
+body #dialog .confirm-art[data-feature=mayhem]{background-image:url('public/optimized-v1/donut.webp')}
+body #dialog .card b{color:#67457a!important;font-size:21px;margin:0 0 7px;line-height:1.1}
+body #dialog .card span{color:#8b7293!important;font-size:13px;line-height:1.4}
+body #dialog .card span:last-child{color:#b64d8d!important;margin-top:12px;padding-top:10px;border-top:1px solid #f0e2ed;font-size:16px}
+body #dialog .card:disabled{opacity:1;background:#f1e9f6;border-color:#c4a3d4;cursor:default}
+body #dialog .card:disabled span:last-child{color:#896298!important}
+body #dialog .settings-list{display:grid;gap:12px}
+body #dialog .setting-row{position:relative;display:flex;align-items:center;gap:14px;margin:0;padding:18px 16px;border:1px solid #dfcfe7;border-radius:16px;background:#fffafc;cursor:pointer}
+body #dialog .setting-row>span:first-child{flex:1;min-width:0}
+body #dialog .setting-row b{display:block;font-size:21px}
+body #dialog .setting-row small{display:block;margin-top:5px;font-size:13px;line-height:1.4;color:#927a9a!important}
+body #dialog .setting-row input{position:absolute;right:16px;width:52px;height:30px;margin:0;opacity:0;cursor:pointer}
+body #dialog .setting-switch{flex:none;width:52px;height:30px;border-radius:18px;background:#d5c8de;box-shadow:inset 0 1px 3px #765a8a25;pointer-events:none;transition:background .15s}
+body #dialog .setting-switch::before{content:'';display:block;width:24px;height:24px;margin:3px;border-radius:50%;background:white;box-shadow:0 2px 3px #65437d2b;transition:transform .15s}
+body #dialog input:checked+.setting-switch{background:#e96cae}
+body #dialog input:checked+.setting-switch::before{transform:translateX(22px)}
+body #dialog input:focus-visible+.setting-switch{outline:3px solid #a869b1;outline-offset:4px}
+body #dialog .history-scroll{overflow:auto;border:1px solid #e0cfe7;border-radius:14px}
+body #dialog table{font-size:14px;white-space:nowrap}
+body #dialog td,body #dialog th{padding:12px 10px;border-bottom:1px solid #eddfef}
+body #dialog th{background:#f0e6f5;color:#876894!important;font-size:13px}
+body #dialog td:first-child,body #dialog th:first-child{text-align:left}
+body #dialog tbody tr:nth-child(even){background:#fffaff}
+body #dialog .history-win{color:#ab4688!important}
+body #dialog .history-bonus{display:block;font-size:10px;color:#a589b1!important}
+body #dialog .modal-empty{text-align:center;padding:20px 0}
+body #dialog .modal-empty img{object-fit:contain;margin-bottom:14px}
+body #dialog .rules-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+body #dialog .rule-card{min-width:0;border:1px solid #e3d4eb;border-radius:18px;padding:16px;background:#fffdfb}
+body #dialog .rule-card h3{font-size:22px;color:#6d477d!important}
+body #dialog .rule-card p{font-size:15px;margin:0;line-height:1.45}
+body #dialog .rule-picture{position:relative;display:flex;align-items:center;justify-content:center;gap:3px;min-height:100px;background:#f2edf8;border-radius:12px;margin-bottom:15px;overflow:hidden}
+body #dialog .rule-symbol{position:relative;display:inline-flex;flex-shrink:1;max-width:64px;min-width:0;align-items:center;justify-content:center}
+body #dialog .rule-symbol img{width:100%;height:auto;object-fit:contain;display:block}
+body #dialog .rule-arrow{font-family:Arial,sans-serif!important;color:#ae7bbd!important;font-size:30px;margin:0 10px}
+body #dialog .rule-mini-row{display:flex;max-width:190px}
+body #dialog .rule-mini-row .rule-symbol{width:32px}
+body #dialog .rule-line{position:absolute;width:88%;height:2px;background:#eeb549aa;bottom:14px;border-radius:2px}
+body #dialog .rule-magic{filter:drop-shadow(0 0 6px #f5bb32)}
+body #dialog .rule-mult{position:absolute;color:#fff!important;font-size:22px;-webkit-text-stroke:3px #536ba0!important;paint-order:stroke fill}
+body #dialog .rule-extra{font-size:32px;color:#b76ba6!important;margin-left:12px}
+body #dialog .rules-controls{margin-top:18px;border-radius:16px;padding:20px;background:#f0e8f6}
+body #dialog .rules-controls h3{font-size:21px}
+body #dialog .rules-controls p{font-size:14px;margin:8px 0 0}
+body #dialog kbd{display:inline-block;background:#fff;border:1px solid #d6bfe3;border-bottom-width:3px;border-radius:6px;padding:3px 8px;font-size:12px;margin-right:6px}
+body #dialog .rules-details{margin-top:16px;border:1px solid #dfcde7;border-radius:14px;padding:16px}
+body #dialog .rules-details summary{cursor:pointer;font-size:18px;color:#8c5a9b!important}
+body #dialog .rules-details p{font-size:14px;margin:12px 0 0}
+@media(hover:hover){body #dialog .card:not(:disabled):hover{background:#fff4fb;border-color:#cf97c7}body #dialog .choices button:not(:disabled):hover{filter:brightness(1.03);border-color:#bb83c4}}
+@media(max-width:600px){body #dialog,body #rgs-status>div{padding:26px 18px 22px;border-radius:22px}body #dialog .rules-grid{grid-template-columns:1fr}body #dialog .rule-card{display:grid;grid-template-columns:100px 1fr;gap:6px 14px;padding:14px}body #dialog .rule-picture{grid-row:1/3;margin:0;min-height:100px;padding:5px;gap:0}body #dialog .rule-card h3{font-size:20px;align-self:end;margin:0}body #dialog .rule-card p{font-size:14px}body #dialog .rule-picture .rule-symbol{max-width:44px}body #dialog .rule-mini-row{display:none}body #dialog .rule-arrow{font-size:21px;margin:0 2px}body #dialog .rule-mult{font-size:18px}body #dialog .rule-extra{font-size:25px;margin-left:3px}body #dialog .card b{font-size:19px}body #dialog .choices{gap:10px}body #dialog .choices button{font-size:19px}body #dialog .setting-row{padding:15px 12px}}
+@media(max-height:500px){body #dialog{padding-top:22px}body #dialog-content::before{margin-bottom:8px}body #dialog h2{font-size:26px;margin-bottom:14px}body #dialog .modal-subtitle{margin-bottom:18px}body #dialog .rule-picture{min-height:80px}body #dialog .card::before{width:44px;height:44px;margin-bottom:7px}}
+@media(prefers-reduced-motion:reduce){body #dialog .setting-switch,body #dialog .setting-switch::before{transition:none}body #dialog[open]{animation:none}}
+/* Temporary RGS diagnostics, outside the scaled game and error overlay. */
+#rgs-debug{position:fixed;z-index:20000;display:flex;flex-direction:column;box-sizing:border-box;overflow:hidden;padding:10px;border:1px solid #a9b5dc;border-radius:12px;background:#172039f5;box-shadow:0 6px 24px #0006;color:#f3f6ff;font:12px/1.35 Arial,sans-serif;text-align:left;touch-action:pan-y;user-select:text;-webkit-user-select:text}
+#rgs-debug *{box-sizing:border-box;font-family:Arial,sans-serif;text-shadow:none;-webkit-text-stroke:0}
+#rgs-debug .rgs-debug-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex:none}
+#rgs-debug .rgs-debug-head b{font-size:14px;color:#fff}
+#rgs-debug .rgs-debug-body{display:flex;flex-direction:column;gap:8px;min-height:0;overflow:auto;overscroll-behavior:contain}
+#rgs-debug p{font-size:11px;line-height:1.35;margin:7px 0 0;color:#c6d1ed}
+#rgs-debug button{border:1px solid #768ab3;border-radius:6px;background:#344b75;color:#fff;padding:7px 8px;font-size:11px;font-weight:bold;cursor:pointer;box-shadow:none;min-height:30px}
+#rgs-debug button:hover{background:#49638f}
+#rgs-debug button:focus-visible,#rgs-debug select:focus-visible,#rgs-debug textarea:focus-visible{outline:2px solid #f9c955;outline-offset:1px}
+#rgs-debug .rgs-debug-actions{display:flex;flex-wrap:wrap;gap:5px}
+#rgs-debug select{width:100%;min-height:94px;flex:none;background:#10192b;color:#cde7ff;border:1px solid #526787;border-radius:5px;font:11px/1.5 monospace;overflow:auto;touch-action:pan-y}
+#rgs-debug option{padding:5px;font:11px/1.5 monospace}
+#rgs-debug textarea{width:100%;height:230px;min-height:90px;flex:1 0 120px;resize:vertical;white-space:pre;background:#0c1425;color:#e0ebff;border:1px solid #526787;border-radius:5px;padding:8px;font:11px/1.5 monospace;touch-action:pan-y;user-select:text;-webkit-user-select:text}
+#rgs-debug.collapsed .rgs-debug-body{display:none}
+#rgs-debug.compact{max-width:calc(100vw - 16px)}
