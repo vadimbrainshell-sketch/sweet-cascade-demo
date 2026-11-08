@@ -145,13 +145,22 @@ class DemoRGS{
  snapshot(){return clone(this.s);}
  reshuffle(board){const slots=board.map((c,i)=>c.kind==='ice'?-1:i).filter(i=>i>=0),pieces=slots.map(i=>board[i]);for(let attempt=0;attempt<256;attempt++){const shuffled=[...pieces];for(let i=shuffled.length-1;i>0;i--){const j=Math.floor(this.rng()*(i+1));[shuffled[i],shuffled[j]]=[shuffled[j],shuffled[i]];}const next=[...board];slots.forEach((i,k)=>next[i]=shuffled[k]);if(!matches(next).length&&moves(next).length)return next;}throw Error('Could not find a playable shuffle. Please try again.');}
  cost(){return this.s.bet*({base:1,luck:2,enhanced:50,mayhem:1000}[this.s.mode]);}
- mode(mode){if(this.s.bonus)throw Error('A bonus is already active.');this.s.mode=mode;this.s.board.forEach(c=>{delete c.mult;});if(mode==='mayhem')this.s.board.forEach(c=>{if(c.kind==='candy')c.mult=[2,5,10][Math.floor(this.rng()*3)];});if(mode==='enhanced')for(let i=0;i<3;i++){let j=Math.floor(this.rng()*49);this.s.board[j].kind=i%2?'rocket':'bomb';this.s.board[j].dir=0;}this.s.version++;return this.snapshot();}
+ mode(mode){
+  if(this.s.bonus)throw Error('A bonus is already active.');
+  const multiplier={base:1,luck:2,enhanced:50,mayhem:1000}[mode];
+  if(!multiplier)throw Error('Unknown mode.');if(mode===this.s.mode)return this.snapshot();
+  const cost=Math.round(this.s.bet*multiplier*100)/100;if(this.s.balance<cost)throw Error('Not enough demo credits.');
+  this.s.balance=Math.round((this.s.balance-cost)*100)/100;this.s.lastCost=cost;this.s.mode=mode;this.s.board=this.fresh();this.s.meter=0;
+  if(mode==='mayhem')this.s.board.forEach(c=>{if(c.kind==='candy')c.mult=[2,5,10][Math.floor(this.rng()*3)];});
+  if(mode==='enhanced')for(let i=0;i<3;i++){let j=Math.floor(this.rng()*49);this.s.board[j].kind=i%2?'rocket':'bomb';this.s.board[j].dir=0;}
+  this.s.version++;return this.snapshot();
+ }
  bonusStart(){const s=this.s;s.bonus={moves:5,chains:0,mult:0,win:0,bet:s.bet,base:clone(s.board),meter:s.meter};s.board=this.fresh();for(let i=35;i<49;i++)s.board[i]={id:++s.id,kind:'ice',hp:2,mult:[2,3,5,10][Math.floor(this.rng()*4)],color:-1};for(const c of s.board)if(c.kind==='ice')c.maxHp=c.hp;if(!moves(s.board).length)s.board=this.reshuffle(s.board);s.mode='base';}
  buy(){if(this.s.bonus)throw Error('A bonus is already active.');if(this.s.balance<this.s.bet*100)throw Error('Not enough demo credits.');this.s.balance-=this.s.bet*100;this.bonusStart();this.s.version++;return this.snapshot();}
  play(a,b,requestId=crypto.randomUUID(),version=this.s.version){
   if(this.cache.has(requestId))return clone(this.cache.get(requestId));
   const s=this.s;if(version!==s.version)throw Error('The game state has changed. Please try again.');if(!validSwap(s.board,a,b))return {accepted:false,events:[],state:this.snapshot()};
-  const cost=s.bonus?0:this.cost();if(s.balance<cost)throw Error('Not enough demo credits.');s.balance-=cost;
+  const cost=s.bonus?0:this.cost();if(s.balance<cost)throw Error('Not enough demo credits.');s.balance-=cost;s.lastCost=cost;
   let chains=s.bonus?.chains||0,mult=s.bonus?.mult||0,bonus=s.bonus,roundBet=bonus?.bet||s.bet,magic=0;
   if(bonus)bonus.moves--;
   const events=[],board=s.board;[board[a],board[b]]=[board[b],board[a]];
@@ -1103,7 +1112,7 @@ class RgsBoardAdapter {
   if(!bet||!Array.isArray(bet.events))throw Error('Missing server result.');
   const start=rgsMatrix(bet.reels);if(start.some((c,i)=>c?.id!==previous[i]?.serverId))throw Error('Server board differs from the displayed board.');
   if(start.some((c,i)=>c?.id===19&&c.health!==previous[i]?.hp))throw Error('Server ice health changed between moves without a damage event.');
-  let board=start.map((c,i)=>this.piece(c,previous[i])),events=[],step=0,win=0,accepted=false,phase='ready',fired=new Map(),damage=new Map(),magicCells=[],moveAwards=[],collected=[],regularGroups=[],payouts=[];
+  let board=start.map((c,i)=>this.piece(c,previous[i])),events=[],step=0,win=0,accepted=false,phase='ready',fired=new Map(),damage=new Map(),magicCells=[],moveAwards=[],collected=[],regularGroups=[],payouts=[],clearGroups=[];
   if(JSON.stringify(board)!==JSON.stringify(previous))events.push({type:'properties',board:structuredClone(board)});
   const properties=mask=>{
    let changed=false;
@@ -1127,7 +1136,7 @@ class RgsBoardAdapter {
      if(!e.award||e.award.type!==undefined||!Number.isSafeInteger(e.award.number)||e.award.number<1)throw Error('Invalid bonus move award.');
      moveAwards.push({i:indices[0],number:e.award.number});
     }
-    meter=e.count;magicCells.push(...indices);continue;
+    meter=e.count;magicCells.push(...indices);if(clearGroups.length)clearGroups.at(-1).meter=e.count;continue;
    }
    if(e.type==='round_multiplier'){
     if(!accepted||phase!=='ready')throw Error('Unexpected multiplier event.');
@@ -1159,11 +1168,12 @@ class RgsBoardAdapter {
     if(!accepted||phase!=='ready')throw Error('Unexpected match sequence.');
     const mask=rgsMatrix(e.reels);
     properties(mask);
+    const group={type:e.type,cells:mask.flatMap((c,i)=>c?[i]:[]),effects:[],payouts:[],win:e.win??0};clearGroups.push(group);
     if(e.type==='regular')regularGroups.push(mask.flatMap((c,i)=>c?[i]:[]));
     if(e.type==='arrow'||e.type==='bomb')mask.forEach((c,i)=>{
-     if(c?.activated===1&&((e.type==='arrow'&&c.id>=13&&c.id<=16)||(e.type==='bomb'&&c.id===17)))fired.set(i,{kind:e.type==='arrow'?'rocket':'bomb',i,dir:c.id-13});
+     if(c?.activated===1&&((e.type==='arrow'&&c.id>=13&&c.id<=16)||(e.type==='bomb'&&c.id===17))){const effect={kind:e.type==='arrow'?'rocket':'bomb',i,dir:c.id-13};fired.set(i,effect);group.effects.push(effect);}
     });
-    if(e.win!==undefined){if(!Number.isFinite(e.win)||e.win<0)throw Error('Invalid event win.');win+=e.win;if(e.win>0){const cells=mask.flatMap((c,i)=>c?[i]:[]),colors=[...new Set(cells.map(i=>board[i]?.color).filter(c=>c>=0))];payouts.push({amount:e.win,cells,color:colors.length===1?colors[0]:null});}}continue;
+    if(e.win!==undefined){if(!Number.isFinite(e.win)||e.win<0)throw Error('Invalid event win.');win+=e.win;if(e.win>0){const cells=mask.flatMap((c,i)=>c?[i]:[]),colors=[...new Set(cells.map(i=>board[i]?.color).filter(c=>c>=0))],payout={amount:e.win,cells,color:colors.length===1?colors[0]:null};payouts.push(payout);group.payouts.push(payout);}}continue;
    }
    if(e.type==='tumble'&&e.action==='clean'){
     if(!accepted||phase!=='ready')throw Error('Unexpected clean sequence.');
@@ -1177,7 +1187,7 @@ class RgsBoardAdapter {
     });
     if(magicCells.some(i=>!cells.includes(i))||collected.some(i=>!cells.includes(i)&&!ice.includes(i)))throw Error('Collected symbol was not destroyed.');
     board=clean.map((c,i)=>this.piece(c,board[i]));
-    events.push({type:'destroy',cells,ice,moveAwards,regularGroups,payouts,damage:[...damage.keys()],magicCells:[...new Set(magicCells)],collected:[...new Set(collected)],meter,armed:[],effects,step:step++,win:Math.round(win*100)/100,mult,board:structuredClone(board)});damage.clear();magicCells=[];moveAwards=[];collected=[];regularGroups=[];payouts=[];phase='clean';continue;
+    events.push({type:'destroy',cells,ice,moveAwards,regularGroups,payouts,clearGroups,damage:[...damage.keys()],magicCells:[...new Set(magicCells)],collected:[...new Set(collected)],meter,armed:[],effects,step:step++,win:Math.round(win*100)/100,mult,board:structuredClone(board)});damage.clear();magicCells=[];moveAwards=[];collected=[];regularGroups=[];payouts=[];clearGroups=[];phase='clean';continue;
    }
    if(e.type==='tumble'&&e.action==='fall'){
     if(phase!=='clean')throw Error('Unexpected fall sequence.');
@@ -2296,6 +2306,43 @@ function mountRgsDebug({transport,board,serverMode}){
  return log;
 }
 
+// Wallet authority stays in RGS; only the displayed credit is deferred.
+function balanceBeforeWin(before,confirmedCost,decimals=2){
+ const unit=10**decimals;
+ return (Math.round(before*unit)-Math.round(confirmedCost*unit))/unit;
+}
+
+// One clean snapshot can settle several ordered RGS hits. Preserve those hits
+// for presentation while keeping their final board and total exactly unchanged.
+function orderedClearEvents(events){
+ return events.flatMap(event=>{
+  if(event.type!=='destroy'||!(event.clearGroups?.length>1))return [event];
+  const groups=event.clearGroups,removed=[...event.cells,...event.ice],owners=new Map();
+  const ownerOf=i=>{const found=groups.findIndex(g=>g.cells.includes(i));return found<0?groups.length-1:found;};
+  for(const i of removed)owners.set(i,ownerOf(i));
+  // A booster hit by an earlier blast must survive until its own activation.
+  const effectOwners=new Map();
+  for(const effect of event.effects){const j=groups.findIndex(g=>g.effects.some(v=>v.i===effect.i));effectOwners.set(effect.i,j<0?groups.length-1:j);if(owners.has(effect.i))owners.set(effect.i,effectOwners.get(effect.i));}
+  let shownWin=event.win-groups.reduce((sum,g)=>sum+g.win,0);
+  return groups.map((group,j)=>{
+   const own=i=>owners.get(i)===j,last=j===groups.length-1;
+   shownWin+=group.win;
+   return {...event,clearGroups:undefined,
+    cells:event.cells.filter(own),ice:event.ice.filter(own),
+    damage:event.damage.filter(i=>(owners.get(i)??ownerOf(i))===j),
+    effects:event.effects.filter(v=>effectOwners.get(v.i)===j),
+    regularGroups:group.type==='regular'?[group.cells]:[],payouts:group.payouts,
+    magicCells:event.magicCells.filter(own),moveAwards:event.moveAwards.filter(a=>own(a.i)),
+    collected:event.collected.filter(own),armed:last?event.armed:[],
+    meter:group.meter??(last?event.meter:undefined),
+    win:last?event.win:Math.round(shownWin*100)/100,
+    // moves is assigned to the original batch by ServerRGS. Apply once, last.
+    moves:last?event.moves:undefined,
+   };
+  });
+ });
+}
+
 async function startGame(){
 const $=s=>document.querySelector(s), money=n=>Number.isFinite(n)?n.toLocaleString('en-US',{minimumFractionDigits:state?.decimals??2,maximumFractionDigits:state?.decimals??2}):'—';
 mountLayout($('#game'));
@@ -2351,6 +2398,7 @@ let boardWaveElapsed=-1,boardWaveOrigin={column:3,row:3};
 async function settleBoard(origin=boardWaveOrigin){boardWaveOrigin={...origin};try{await animate(BOARD_WAVE_MS,t=>{boardWaveElapsed=t*BOARD_WAVE_MS;});}finally{boardWaveElapsed=-1;}}
 const boosterVFX=new BoosterVFX({parent:fx,position:pos,node:i=>nodes.get(visual[i]?.id),art:kind=>boosterArt[kind],animate,pause,sound:name=>sound.play(name),loop:name=>sound.loop(name)});
 const donutTexture=await prepareTask('donut',()=>PIXI.Assets.load('public/optimized-v1/donut.webp'));
+const shuffleTexture=await prepareTask('shuffle',()=>PIXI.Assets.load('public/optimized-v1/shuffle.webp'));
 const donutVFX=new DonutVFX({parent:fx,position:pos,texture:donutTexture,animate,sound:(name,step)=>sound.play(name,step),loop:name=>sound.loop(name)});
 document.addEventListener('pointerdown',()=>swipeHint.reset(),{capture:true});
 document.addEventListener('keydown',()=>swipeHint.reset(),{capture:true});
@@ -2452,10 +2500,59 @@ function showCombinationWin({amount,cells,color}){
  animate(1000,u=>{if(t.destroyed)return;const enter=Math.min(1,u/.15);t.scale.set(winScale*(.75+.25*(1-(1-enter)**3)));t.y=sy-42*u;t.alpha=u<.65?1:Math.max(0,(1-u)/.35);}).finally(()=>t.destroy());
 }
 function float(text,i,color='#ffffff'){const isMultiplier=text.startsWith('×'),muted=isMultiplier&&visual[i]?.kind==='ice';let t=isMultiplier?multiplierLabel(text,36,muted):label(text,30,color);if(muted)t.alpha=.7;Object.assign(t,pos(i));fx.addChild(t);tween(t,{y:t.y-70,alpha:0},800).then(()=>t.destroy());}
-async function shuffleBoard(board){sound.play('shuffle');float('SHUFFLE',24);const moving=()=>[...nodes.values()].filter(n=>n.kind!=='ice');await Promise.all(moving().map(n=>Promise.all([tween(n,{x:350,y:350,rotation:Math.PI,alpha:0},400),tween(n.scale,{x:.1,y:.1},400)])));draw(board);for(const n of moving()){n.rotation=0;n.scale.set(.1);n.alpha=0;}await Promise.all(moving().map(n=>Promise.all([tween(n.scale,{x:1,y:1},300),tween(n,{alpha:1},250)])));}
+async function shuffleBoard(board){
+ swipeHint.reset();symbolHint.reset();
+ const moving=()=>[...nodes.values()].filter(n=>n.kind!=='ice');
+ // Presentation only: board is supplied by the engine, never invented for RGS.
+ const origin=visual[24]?.kind!=='ice'?24:visual.findIndex(c=>c.kind!=='ice');
+ const center=pos(origin<0?24:origin),prop=new PIXI.Container();
+ prop.label='shuffle-candy';prop.eventMode='none';prop.position.set(center.x,center.y);fx.addChild(prop);
+ const sprite=new PIXI.Sprite(shuffleTexture);sprite.anchor.set(.5);sprite.width=sprite.height=110;
+ const glow=bakedSymbolGlow(sprite,sprite.scale.x,sprite.scale.y,9);glow.tint=0xffce88;glow.alpha=.65;glow.blendMode='add';
+ prop.addChild(glow,sprite);
+ try{
+  sound.play('boosterAppear');
+  const covered=nodes.get(visual[origin]?.id);
+  await Promise.all([animate(440,t=>{const k=1+2.70158*(t-1)**3+1.70158*(t-1)**2;prop.scale.set(Math.max(0,k));prop.alpha=Math.min(1,t*4);prop.rotation=-.22*(1-t);}),covered?tween(covered,{alpha:.16},240):Promise.resolve()]);
+  sound.play('shuffle');float('SHUFFLE',24);
+  await animate(380,t=>{prop.rotation=Math.PI*2*t*t;prop.scale.set(1+.14*t);glow.alpha=.65+.2*t;});
+  const spinStart=prop.rotation;
+  // Independent launch times and angular/radial speeds break up the square grid.
+  // Deterministic cell seeds keep the motion reproducible without changing the board.
+  const paths=(list,salt=0)=>list.map(n=>{
+   const dx=n.x-center.x,dy=n.y-center.y,radius=Math.hypot(dx,dy),seed=n.index+1+salt;
+   const u=(seed*.61803398875)%1,v=(seed*.754877666)%1,w=(seed*.569840291)%1;
+   return {n,radius,angle:Math.atan2(dy,dx),alpha:n.alpha,x:n.x,y:n.y,
+    delay:.22*u,duration:.55+.2*v,turns:Math.PI*(1.15+1.15*w),radialPower:1.3+.8*v,spin:.35+.4*u};
+  });
+  const inward=paths(moving());
+  await animate(940,t=>{
+   prop.rotation=spinStart+Math.PI*3*t;prop.scale.set(1.14-.24*t);glow.alpha=.85;
+   for(const path of inward){
+    const {n,radius,angle,delay,duration,turns,radialPower,spin}=path,p=Math.max(0,Math.min(1,(t-delay)/duration));
+    const travel=p*p*(3-2*p),turn=turns*travel*travel,r=radius*(1-travel)**radialPower,a=angle+turn;
+    n.position.set(center.x+Math.cos(a)*r,center.y+Math.sin(a)*r);
+    n.rotation=turn*spin;n.scale.set(Math.max(.04,(1-travel)**.85));n.alpha=path.alpha*(1-Math.max(0,(travel-.62)/.38));
+   }
+  });
+  draw(board);
+  const outward=paths(moving(),71),exitSpin=prop.rotation;
+  // Start every new candy at the vortex, then unwind into its server/engine cell.
+  await animate(1020,t=>{
+   prop.rotation=exitSpin+Math.PI*2*t;prop.scale.set(.9*(1-t)**1.4);prop.alpha=Math.max(0,1-t*2);
+   for(const path of outward){
+    const {n,radius,angle,delay,duration,turns,radialPower,spin}=path,p=Math.max(0,Math.min(1,(t-delay)/duration));
+    const travel=p*p*(3-2*p),turn=-turns*(1-travel)**2,r=radius*travel**radialPower,a=angle+turn;
+    n.position.set(center.x+Math.cos(a)*r,center.y+Math.sin(a)*r);
+    n.rotation=turn*spin;n.scale.set(.04+.96*(1-(1-travel)**2));n.alpha=Math.min(1,p*4);
+   }
+  });
+  for(const {n,x,y}of outward){n.position.set(x,y);n.rotation=0;n.scale.set(1);n.alpha=1;}
+ }finally{prop.destroy({children:true});}
+}
 async function effect(e){return e.kind==='donut'?donutVFX.play({...e,tint:palette[e.color]??palette[0]}):boosterVFX.play(e);}
 function updateConnectionIndicator(){const status=serverMode&&rgs.transport.healthy&&rgs.sessionEnvironment?rgs.sessionEnvironment:'offline';const dot=$('#connection');dot.dataset.status=status;dot.title=dot.ariaLabel=({production:'Production RGS connected',test:'Test RGS connected',offline:'No RGS connection'})[status];}
-function hud(winGain){const gain=winGain??Math.max(0,displayWin-lastHudWin);lastHudWin=displayWin;if(gain>0)bounceWin(gain);updateConnectionIndicator();const b=state.bonus,award=state.freeRounds;$('#balance').textContent=money(state.balance);$('#bet').textContent=money(serverMode&&!b&&!award?rgs.cost():state.bet);$('#bet-label').textContent=serverMode&&state.mode!=='base'?'BET ×'+rgs.modeOffer(state.mode).multiplier:'BET';$('#win').textContent=money(displayWin);$('#mult-value').textContent='×'+displayMult;$('#win-label').textContent=b?'BONUS WIN':'WIN';$('#meter-title').textContent=b?'MOVES LEFT: '+b.moves:'ICE BONUS';$('#moves-label').textContent=b?'Magic candy = +1 move':'Collect 3 magic candies';$('#bonus-progress').hidden=!!(b||award);const collected=Math.max(0,Math.min(3,Number(state.meter)||0));$('#meter-fill').style.width=(collected/3*100)+'%';$('#meter').setAttribute('aria-valuenow',String(collected));$('#meter-count').textContent=collected+' / 3';$('#game').classList.toggle('bonus-active',!!b);for(const id of ['minus','plus','bonus'])$('#'+id).disabled=busy||!!b;if(serverMode){for(const id of ['minus','plus','auto'])$('#'+id).disabled=busy||!rgs.playable||(id!=='auto'&&(!!(b||award)||state.mode!=='base'));$('#bonus').disabled=busy||!rgs.playable||!!(b||award)||!(rgs.iceOffer()||rgs.modeOffer('luck')||rgs.modeOffer('enhanced'));$('#bonus').title=rgs.iceOffer()?'Buy ice bonus':'Not available in this RGS version';$('#mult').style.visibility='visible';if(b||award){$('#win-label').textContent='LAST MOVE WIN';}}if(award){$('#meter-title').textContent='FREE MOVES: '+award.remaining+(b?' · ICE: '+b.moves:'');$('#moves-label').textContent=(award.completeTotal?'TOTAL WON ':'WON SINCE RELOAD ')+(state.currency?state.currency+' ':'')+money(award.knownWin);$('#minus').disabled=$('#plus').disabled=true;}$('#bet-open').disabled=busy||!!(b||award)||(serverMode&&(!rgs.playable||state.mode!=='base'));$('#bet-open').setAttribute('aria-label','Choose base bet, current '+money(state.bet));$('#bet-open').title=serverMode&&state.mode!=='base'?'Return to Normal play to change the base bet.':'';$('#auto').classList.toggle('active',auto>0);$('#auto').setAttribute('aria-pressed',String(auto>0));$('#auto').title=auto?'Remaining: '+auto:'Autoplay';}
+function hud(winGain){const gain=winGain??Math.max(0,displayWin-lastHudWin);lastHudWin=displayWin;if(gain>0)bounceWin(gain);updateConnectionIndicator();const b=state.bonus,award=state.freeRounds;$('#balance').textContent=money(state.balance);$('#bet').textContent=money(!b&&!award?rgs.cost():state.bet);$('#bet-label').textContent=state.mode!=='base'?'BET ×'+(serverMode?rgs.modeOffer(state.mode).multiplier:({luck:2,enhanced:50,mayhem:1000}[state.mode])):'BET';$('#win').textContent=money(displayWin);$('#mult-value').textContent='×'+displayMult;$('#win-label').textContent=b?'BONUS WIN':'WIN';$('#meter-title').textContent=b?'MOVES LEFT: '+b.moves:'ICE BONUS';$('#moves-label').textContent=b?'Magic candy = +1 move':'Collect 3 magic candies';$('#bonus-progress').hidden=!!(b||award);const collected=Math.max(0,Math.min(3,Number(state.meter)||0));$('#meter-fill').style.width=(collected/3*100)+'%';$('#meter').setAttribute('aria-valuenow',String(collected));$('#meter-count').textContent=collected+' / 3';$('#game').classList.toggle('bonus-active',!!b);for(const id of ['minus','plus','bonus'])$('#'+id).disabled=busy||!!b;if(serverMode){for(const id of ['minus','plus','auto'])$('#'+id).disabled=busy||!rgs.playable||(id!=='auto'&&(!!(b||award)||state.mode!=='base'));$('#bonus').disabled=busy||!rgs.playable||!!(b||award)||!(rgs.iceOffer()||rgs.modeOffer('luck')||rgs.modeOffer('enhanced'));$('#bonus').title=rgs.iceOffer()?'Buy ice bonus':'Not available in this RGS version';$('#mult').style.visibility='visible';if(b||award){$('#win-label').textContent='LAST MOVE WIN';}}if(award){$('#meter-title').textContent='FREE MOVES: '+award.remaining+(b?' · ICE: '+b.moves:'');$('#moves-label').textContent=(award.completeTotal?'TOTAL WON ':'WON SINCE RELOAD ')+(state.currency?state.currency+' ':'')+money(award.knownWin);$('#minus').disabled=$('#plus').disabled=true;}$('#bet-open').disabled=busy||!!(b||award)||(serverMode&&(!rgs.playable||state.mode!=='base'));$('#bet-open').setAttribute('aria-label','Choose base bet, current '+money(state.bet));$('#bet-open').title=serverMode&&state.mode!=='base'?'Return to Normal play to change the base bet.':'';$('#auto').classList.toggle('active',auto>0);$('#auto').setAttribute('aria-pressed',String(auto>0));$('#auto').title=auto?'Remaining: '+auto:'Autoplay';}
 function persist(){if(serverMode||visualPreview)return;localStorage.setItem(KEY,JSON.stringify(rgs.snapshot()));}
 let toastTimer;function toast(t){$('#toast').textContent=t;$('#toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),3000);}
 function updateSpeed(){speed=persistentTurbo||held||fastRequested?1.8:1;}
@@ -2486,7 +2583,8 @@ async function play(a,b,swishPlayed=false){if(orientationBlocked()||!startupComp
   }catch(e){if(!serverMode)rgs.s=before;throw e;}
   if(!before.bonus){iceMarks.clear();iceMarks.sync(visual,nodes);}
   if(!result.accepted){sound.play('invalid');const na=nodes.get(visual[a]?.id),nb=nodes.get(visual[b]?.id);if(na&&nb){if(!previewSwap)await Promise.all([tween(na,pos(b),110),tween(nb,pos(a),110)]);await Promise.all([tween(na,pos(a),150),tween(nb,pos(b),150)]);}return;}
-  persist();state.balance=serverMode?result.state.balance:before.balance-(before.bonus?0:before.bet*({base:1,luck:2,enhanced:50,mayhem:1000}[before.mode]));if(auto&&!before.bonus)auto--;hud();
+  persist();state.balance=balanceBeforeWin(before.balance,result.state.lastCost,before.decimals??2);if(auto&&!before.bonus)auto--;hud();
+  result.events=orderedClearEvents(result.events);
   const waveAfter=cascadeWaveAfter(result.events),collectionFlights=[];let pendingMult=0,pendingMagic=0,plannedMult=displayMult,plannedMeter=state.meter,previousCascadeWin=before.bonus?.win||0;
   for(const [eventIndex,e] of result.events.entries()){if(e.type==='properties'){if(e.board.some(c=>c?.magic&&!visual.some(old=>old?.id===c.id&&old.magic)))sound.play('magicAppear');draw(e.board);}if(e.type==='progress'){if(!pendingMult&&!pendingMultiplierCollection(result.events,eventIndex)){if(e.mult>displayMult)sound.play('multiplier');displayMult=e.mult;}if(!pendingMagic&&!pendingMagicCollection(result.events,eventIndex)){state.meter=e.meter;plannedMeter=e.meter;}hud();}if(e.type==='swap'){const swapA=e.a??a,swapB=e.b??b;if(!swishPlayed)sound.play('swap');if(state.bonus&&Number.isInteger(e.moves))state.bonus.moves=e.moves;hud();let na=nodes.get(visual[swapA]?.id),nb=nodes.get(visual[swapB]?.id);if(!previewSwap)await Promise.all([tween(na,pos(swapB),165),tween(nb,pos(swapA),165)]);visual=clone(e.board);nodes.get(visual[swapA].id).index=swapA;nodes.get(visual[swapB].id).index=swapB;iceMarks.sync(visual,nodes);}
    if(e.type==='destroy'){const cells=[...e.cells,...e.ice],effects=[...e.effects,...colorClearEffects(visual,e,[b,a])];
@@ -2521,6 +2619,7 @@ async function play(a,b,swishPlayed=false){if(orientationBlocked()||!startupComp
    }if(e.type==='fall'){await fall(e.board);if(eventIndex===waveAfter)await settleBoard(cascadeWaveOrigin(result.events,waveAfter));}if(e.type==='shuffle')await shuffleBoard(e.board);
   }
   await Promise.all(collectionFlights);
+  displayWin=result.bonusTotalWin??result.win;hud();
   // Present only settled paid wins or the confirmed bonus total, never cumulative bonus moves.
   const completedAward=result.freeRoundsCompleted,confirmedAwardTotal=completedAward?.completeTotal&&Number.isFinite(completedAward.knownWin);
   if(!completedAward||confirmedAwardTotal)await winner.show({...winnerAward(result,serverMode&&!before.bonus&&!before.freeRounds?{...before,bet:before.bet*(rgs.modeOffer(before.mode)?.multiplier??1)}:before),format:money,bonusComplete:!!result.bonusEnded||!!confirmedAwardTotal});
@@ -2583,7 +2682,7 @@ $('#bet-open').onclick=()=>{
   if(selected)close();else buttons.forEach(b=>b.disabled=false);
  });
 };
-$('#bonus').onclick=()=>{if(serverMode){showServerFeatures();return;}if(busy||state.bonus)return;modal('<h2>CHOOSE A MODE</h2><p class="modal-subtitle">A little more magic for your next move.</p><div class="cards">'+[['base','Normal play','1× per move'],['luck','Extra Luck','2× per move · more magic candies'],['enhanced','Enhanced Moves','50× per move · bombs, rockets and multipliers'],['ice','Ice Bonus','100× · buy 5 free moves'],['mayhem','Multi Mayhem','1000× per move · multiplier board']].map(([id,name,desc])=>`<button class="card" data-mode="${id}"><b>${name}</b><span>${desc}</span><span>${money(state.bet*({base:1,luck:2,enhanced:50,ice:100,mayhem:1000}[id]))} credits</span></button>`).join('')+'</div>');document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{const mode=b.dataset.mode;$('#dialog-content').innerHTML='<h2>'+b.querySelector('b').textContent+'</h2><p>'+ (mode==='ice'?'Cost: '+money(state.bet*100)+' demo credits.':'Changing mode is free. Your next move uses the selected price.')+'</p><button id="confirm" class="modal-action">CONFIRM</button>';$('#confirm').onclick=async()=>{if(busy)return;busy=true;try{state=mode==='ice'?rgs.buy():rgs.mode(mode);persist();displayWin=0;displayMult=1;close();if(mode==='ice')await presentBonus();else{draw(state.board);hud();sound.play('click');}}catch(e){toast(e.message);}finally{busy=false;hud();}};});};
+$('#bonus').onclick=()=>{if(serverMode){showServerFeatures();return;}if(busy||state.bonus)return;modal('<h2>CHOOSE A MODE</h2><p class="modal-subtitle">A little more magic for your next move.</p><div class="cards">'+[['base','Normal play','1× per move'],['luck','Extra Luck','2× per move · more magic candies'],['enhanced','Enhanced Moves','50× per move · bombs, rockets and multipliers'],['ice','Ice Bonus','100× · buy 5 free moves'],['mayhem','Multi Mayhem','1000× per move · multiplier board']].map(([id,name,desc])=>`<button class="card" data-mode="${id}"><b>${name}</b><span>${desc}</span><span>${money(state.bet*({base:1,luck:2,enhanced:50,ice:100,mayhem:1000}[id]))} credits</span></button>`).join('')+'</div>');document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{const mode=b.dataset.mode;$('#dialog-content').innerHTML='<h2>'+b.querySelector('b').textContent+'</h2><p>'+ (mode==='ice'?'Cost: '+money(state.bet*100)+' demo credits.':mode===state.mode?'This mode is already active.':('Start a new board for <b>'+money(state.bet*({base:1,luck:2,enhanced:50,mayhem:1000}[mode]))+'</b> demo credits. Each following move costs the same amount.'))+'</p><button id="confirm" class="modal-action">CONFIRM</button>';$('#confirm').onclick=async()=>{if(busy)return;busy=true;try{state=mode==='ice'?rgs.buy():rgs.mode(mode);persist();displayWin=0;displayMult=1;close();if(mode==='ice')await presentBonus();else{draw(state.board);hud();sound.play('click');}}catch(e){toast(e.message);}finally{busy=false;hud();}};});};
 $('#auto').onclick=()=>{if(serverMode&&!rgs.playable)return;if(auto){stop();return;}modal('<h2>AUTOPLAY</h2><p class="modal-subtitle">Choose how many paid moves to play.</p><p class="modal-note">Tap Auto again to stop after the current move.</p><div class="choices">'+[5,10,25,50,100,250,500,1000].map(n=>`<button data-count="${n}">${n}</button>`).join('')+'</div>');document.querySelectorAll('[data-count]').forEach(b=>b.onclick=()=>{auto=Number(b.dataset.count);close();hud();if(!busy)play();});};
 $('#settings').onclick=()=>{modal('<h2>SETTINGS</h2><p class="modal-subtitle">Make yourself at home.</p><div class="settings-list"><label class="setting-row"><span><b>Sound effects</b><small>Swaps, candy pops & celebrations</small></span><input id="sfx-check" type="checkbox" '+(sound.enabled?'checked':'')+'><span class="setting-switch" aria-hidden="true"></span></label><label class="setting-row"><span><b>Music</b><small>A little melody for your kingdom</small></span><input id="music-check" type="checkbox" '+(sound.music?'checked':'')+'><span class="setting-switch" aria-hidden="true"></span></label></div><button id="history" class="modal-action secondary-action" type="button">Move history <span aria-hidden="true">→</span></button><p class="modal-footnote">'+(serverMode?'Test credits · Reload starts a new session.':'Your board and bonus progress are saved in this browser.')+'</p>');$('#history').onclick=showHistory;$('#sfx-check').onchange=e=>{sound.unlock();sound.enabled=e.target.checked;};$('#music-check').onchange=e=>{sound.unlock();sound.music=e.target.checked;};};
 const showHistory=()=>modal('<h2>MOVE HISTORY</h2><p class="modal-subtitle">Your last 20 moves at a glance.</p>'+(state.history.length?'<div class="history-scroll"><table><thead><tr><th>Time</th><th>Cost</th><th>Win</th><th>Multiplier</th></tr></thead><tbody>'+state.history.slice(0,20).map(h=>`<tr><td>${new Date(h.time).toLocaleTimeString('en-US')}${h.bonus?'<small class="history-bonus">BONUS</small>':''}</td><td>${money(h.cost)}</td><td class="history-win">${money(h.win)}</td><td>×${h.mult}</td></tr>`).join('')+'</tbody></table></div>':'<div class="modal-empty"><img src="public/optimized-v1/candy-yellow.webp" width="72" height="72" alt=""><h3>Your story starts with a move</h3><p>Completed moves will appear here.</p></div>'));
@@ -2628,7 +2727,17 @@ if(params.has('qa')){
   const button=document.createElement('button');button.textContent=text;button.style.cssText='background:#172944;padding:9px;border-radius:8px;font-size:11px';button.onclick=run;qa.append(button);
  }
  if(visualPreview){
+  window.sweetCascade.previewShuffle=()=>preview(async()=>{
+   const before=clone(visual),demo=new DemoRGS(clone(state)),next=demo.reshuffle(before);
+   try{
+    await shuffleBoard(next);
+    // Keep exactly the board the candies flew into, including subsequent hints/moves.
+    // This control exists only in the local visual demo, never in an RGS session.
+    rgs.s.board=clone(next);rgs.s.seed=demo.s.seed;rgs.s.version++;state=rgs.snapshot();selected=null;
+   }catch(error){draw(before);throw error;}
+  });
   window.sweetCascade.previewArmed=()=>preview(async()=>{const before=clone(visual),demo=clone(visual);try{for(const [dir,i]of [17,25,31,23].entries())demo[i]={id:-9700-dir,kind:'rocket',dir,color:0};demo[24]={id:-9710,kind:'bomb',color:1};draw(demo);for(const i of [17,25,31,23,24])boosterVFX.arm(nodes.get(visual[i].id));await pause(2400);}finally{draw(before);}});
+  const shuffleButton=document.createElement('button');shuffleButton.textContent='SHUFFLE';shuffleButton.style.cssText='background:#743e7a;padding:9px;border-radius:8px;font-size:11px';shuffleButton.onclick=window.sweetCascade.previewShuffle;qa.append(shuffleButton);
   window.sweetCascade.previewRocketSweep=(dir=1)=>preview(async()=>{const before=clone(visual),i=[45,21,3,27][dir],demo=visual.map((c,j)=>({...c,id:-9750-j}));demo[i]={id:-9720,kind:'rocket',dir,color:0};draw(demo);try{const e={kind:'rocket',i,dir,preview:true},targets=demo.flatMap((c,j)=>j!==i&&rocketContactMs(pos(i),pos(j),dir)!==null?[j]:[]);await Promise.all([effect(e),(async()=>{if(targets.length>3){await pause(Math.max(...targets.map(j=>rocketContactMs(pos(i),pos(j),dir)))+125);sound.play('bomb');}})(),...targets.map(async j=>{await pause(rocketContactMs(pos(i),pos(j),dir));if(demo[j]?.kind==='candy')sound.play('rocketPop',Math.abs(j%7-i%7)+Math.abs(Math.floor(j/7)-Math.floor(i/7))-1);await dissolveSymbol(j,()=>{},true);})]);await pause(450);}finally{draw(before);}});
   for(const [text,run]of [['ROCKET SWEEP',()=>window.sweetCascade.previewRocketSweep(1)],['ARMED',()=>window.sweetCascade.previewArmed()]]){const button=document.createElement('button');button.textContent=text;button.style.cssText='background:#175779;padding:9px;border-radius:8px;font-size:11px';button.onclick=run;qa.append(button);}
   window.sweetCascade.previewIce=()=>preview(async()=>{const board=clone(visual);try{const demo=clone(visual);demo[23]={id:-9801,kind:'ice',hp:2,maxHp:2,mult:10,color:-1};demo[25]={id:-9802,kind:'ice',hp:1,maxHp:2,mult:10,color:-1};draw(demo);await pause(3500);}finally{draw(board);}});
@@ -2650,6 +2759,7 @@ if(params.has('qa')){
   window.sweetCascade.previewMagic=()=>window.sweetCascade.previewFive(4,false,true);const magicButton=document.createElement('button');magicButton.textContent='MAGIC';magicButton.style.cssText=five.style.cssText;magicButton.onclick=window.sweetCascade.previewMagic;qa.append(magicButton);
   window.sweetCascade.previewMultipliers=()=>window.sweetCascade.previewFive(4,true);const multButton=document.createElement('button');multButton.textContent='MULTIPLIERS';multButton.style.cssText=five.style.cssText;multButton.onclick=window.sweetCascade.previewMultipliers;qa.append(multButton);
  }
+ if(visualPreview&&params.get('qaPanel')==='1'){qa.style.setProperty('display','flex','important');qa.style.flexWrap='wrap';qa.style.maxWidth='calc(100vw - 20px)';}
  document.body.append(qa);
 }
 
