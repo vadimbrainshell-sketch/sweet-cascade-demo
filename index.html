@@ -1,4 +1,4 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Royal Swipe — Match & Win</title><link rel="stylesheet" href="style.css?v=8de3351304bfec4a"></head><body><div id="loading" role="status" aria-label="Loading game">
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Royal Swipe — Match & Win</title><link rel="stylesheet" href="style.css?v=3287b55064c5d52b"></head><body><div id="loading" role="status" aria-label="Loading game">
  <div class="loading-orbit">
  <div class="loading-icons" aria-hidden="true">
  <i><img src="public/optimized-v1/loading-diamond.webp" alt=""></i>
@@ -20,7 +20,7 @@
 <section class="play"><div class="score"><div><small id="win-label">WIN</small><strong id="win">0,00</strong></div><b id="mult"><span id="mult-value">×1</span></b></div><div id="board"></div><div id="message">MATCH 3 OR MORE</div></section>
 <aside aria-label="Game controls">
  <div class="balance"><small>BALANCE <span id="connection" data-status="offline" role="status" aria-label="No RGS connection" title="No RGS connection"></span></small><strong id="balance">10 000,00</strong></div>
- <div class="meter-box"><button id="ice-bonus-open" type="button" aria-label="Open bonus modes" aria-haspopup="dialog" title="Bonus modes"></button><h3 id="meter-title">ICE BONUS</h3><div id="bonus-progress"><div id="meter" role="progressbar" aria-label="Magic candies" aria-valuemin="0" aria-valuemax="3" aria-valuenow="0"><span id="meter-fill"></span><i class="meter-target"></i><i class="meter-target"></i><i class="meter-target"></i><span id="meter-count">0 / 3</span></div><span class="meter-ice" aria-hidden="true"></span></div><span id="moves-label">Collect 3 magic candies</span></div>
+ <div class="meter-box"><button id="ice-bonus-open" type="button" aria-label="Open bonus modes" aria-haspopup="dialog" title="Bonus modes"></button><h3 id="meter-title">ICE BONUS</h3><strong id="ice-moves" hidden></strong><div id="bonus-progress"><div id="meter" role="progressbar" aria-label="Magic candies" aria-valuemin="0" aria-valuemax="3" aria-valuenow="0"><span id="meter-fill"></span><i class="meter-target"></i><i class="meter-target"></i><i class="meter-target"></i><span id="meter-count">0 / 3</span></div><span class="meter-ice" aria-hidden="true"></span></div><span id="moves-label">Collect 3 magic candies</span></div>
 
  <div class="betbox" role="group" aria-labelledby="bet-label">
   <button id="bet-open" class="bet-open" aria-label="Choose bet" aria-haspopup="dialog"></button>
@@ -28,11 +28,11 @@
   <div class="bet-adjust"><button id="minus" aria-label="Decrease bet"><img src="public/ui/candy-v1/icon-minus.svg" alt=""></button><strong id="bet">1,00</strong><button id="plus" aria-label="Increase bet"><img src="public/ui/candy-v1/icon-plus.svg" alt=""></button></div>
 
  </div>
- <div class="bonus-actions"><div class="controls"><button id="turbo" aria-label="Turbo" aria-pressed="false"><img src="public/ui/candy-v1/icon-turbo.svg" alt=""><span>TURBO</span></button><button id="auto" aria-label="Autoplay" aria-pressed="false"><img src="public/ui/candy-v1/icon-auto.svg" alt=""><span>AUTO</span></button></div>
+ <div class="bonus-actions"><div class="controls"><button id="turbo" aria-label="Speed ×1. Select ×2." title="Speed ×1. Select ×2." aria-pressed="false"><img src="public/ui/candy-v1/icon-turbo.svg" alt=""><span>TURBO</span></button><button id="auto" aria-label="Autoplay" aria-pressed="false"><img src="public/ui/candy-v1/icon-auto.svg" alt=""><span>AUTO</span></button></div>
  <button class="bonus-button" id="bonus" aria-label="Bonus modes"><span>BONUS</span></button></div><small class="space-hint">Press SPACE to play · hold to repeat</small>
 </aside>
 
 </main><dialog id="dialog"><button id="close" aria-label="Close">×</button><div id="dialog-content"></div></dialog><div id="toast" role="status"></div>
 <div id="rgs-status" role="alertdialog" aria-modal="true" aria-labelledby="rgs-title"><div><h2 id="rgs-title">CONNECTING</h2><p>Loading your board from the test server…</p><button id="rgs-reload" hidden>RELOAD</button></div></div>
 <script src="public/vendor/pixi.min.js"></script>
-<script src="public/vendor/spine-pixi-v8.min.js"></script><script type="module" src="app.js?v=408ee92ee7dd8b05"></script></body></html>
+<script src="public/vendor/spine-pixi-v8.min.js"></script><script type="module" src="app.js?v=cb6f4ab65f13332a"></script></body></html>
